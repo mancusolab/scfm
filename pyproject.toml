@@ -39,12 +39,12 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-    "jaxlib",
-    "jax",
-    "jaxtyping",
-    "equinox",
-    "lineax",
-    "optimistix",
+  "jaxlib",
+  "jax",
+  "jaxtyping",
+  "equinox",
+  "lineax",
+  "optimistix",
 ]
 
 [project.urls]
@@ -87,28 +87,30 @@ python = ["3.9", "3.10", "3.11", "3.12"]
 [tool.hatch.envs.lint]
 detached = true
 dependencies = [
-    "mypy>=1.0.0",
-    "ruff>=0.2.2",
+  "mypy>=1.0.0",
+  "ruff>=0.2.2",
 ]
 
 [tool.ruff]
 target-version = "py37"
 line-length = 120
+
+[tool.ruff.lint]
 fixable = ["I001", "F401"]
 select = ["E", "F", "I001"]
 ignore = [
-    # Allow non-abstract empty methods in abstract base classes
-    "B027",
-    # Allow boolean positional values in function calls, like `dict.get(... True)`
-    "FBT003",
-    # Ignore checks for possible passwords
-    "S105", "S106", "S107",
-    # Ignore complexity
-    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+  # Allow non-abstract empty methods in abstract base classes
+  "B027",
+  # Allow boolean positional values in function calls, like `dict.get(... True)`
+  "FBT003",
+  # Ignore checks for possible passwords
+  "S105", "S106", "S107",
+  # Ignore complexity
+  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
 ]
 ignore-init-module-imports = true
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["scfm"]
 combine-as-imports = true
 lines-after-imports = 2
@@ -118,10 +120,10 @@ section-order = ["future", "standard-library", "third-party", "jax-ecosystem", "
 extra-standard-library = ["typing_extensions"]
 order-by-type = false
 
-[tool.ruff.isort.sections]
+[tool.ruff.lint.isort.sections]
 jax-ecosystem = ["equinox", "jax", "jaxtyping", "lineax", "optimistix"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 # Tests can use magic values, assertions, and relative imports
 "tests/**/*" = ["PLR2004", "S101", "TID252"]
 
@@ -130,19 +132,6 @@ reportIncompatibleMethodOverride = true
 reportIncompatibleVariableOverride = false  # Incompatible with eqx.AbstractVar
 include = ["scfm", "tests"]
 exclude = ["docs"]
-
-[tool.coverage.run]
-source_pkgs = ["scfm", "tests"]
-branch = true
-parallel = true
-omit = [
-    "src/scfm/__about__.py",
-]
-
-[tool.coverage.paths]
-scfm = ["src/scfm", "*/scfm/src/scfm"]
-tests = ["tests", "*/scfm/tests"]
-
 
 [tool.coverage.run]
 source_pkgs = ["scfm", "tests"]
