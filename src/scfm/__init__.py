@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: MIT
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
+from .infer import (
+    finemap as finemap,
+)
+
 
 try:
     # Change here if project is renamed and does not equal the package name
