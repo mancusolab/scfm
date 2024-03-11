@@ -53,8 +53,12 @@ def data_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorPa
     return ll
 
 
-def KL_divergence(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
-    pass
+def KL_MVN(m0: ArrayLike, sigma0: ArrayLike, m1: ArrayLike, sigma1: ArrayLike, k: int) -> float:
+    term1 = jnp.trace(jnp.inv(sigma1) @ sigma0) - k
+    term2 = (m1 - m0).T @ jnp.inv(sigma1) @ (m1 - m0)
+    term3 = jnp.slogdet(sigma1) - jnp.slogdet(sigma0)
+    KL = 0.5 * (term1 + term2 + term3)
+    return KL
 
 
 def _compute_elbo(ll: float, kl: float) -> float:
@@ -114,7 +118,7 @@ def finemap(Y: ArrayLike, X: ArrayLike, L: int, tol: float = 1e-3, max_iter: int
     )
 
     ll = data_loglikelihood(Y, X, post, prior)
-    kl = KL_divergence(Y, X, post, prior)
+    kl = KL_MVN(Y, X, post, prior)
     cur_elbo = _compute_elbo(ll, kl)
     elbo = cur_elbo = -jnp.inf
     for train_iter in range(max_iter):
