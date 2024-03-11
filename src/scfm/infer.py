@@ -3,6 +3,7 @@ from typing import NamedTuple, Tuple
 import equinox as eqx
 import jax.lax as lax
 import jax.numpy as jnp
+import jax.numpy.linalg as jnpla
 
 from jaxtyping import Array, ArrayLike
 
@@ -34,8 +35,31 @@ def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
     pass
 
 
-def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
+def data_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
+    n, k = Y.shape
+    n, p = X.shape
+    D = jnp.sum(jnpla.diagonal(prior.prob) @ post.mean_b.T, axis=0)
+    A = jnp.sum(prior.prob @ (post.mean_b @ post.mean_b.T + post.var_b), axis=(0, 1))
+    ll = (
+        -0.5
+        * (
+            jnp.trace(jnpla.inv(prior.resid_var) @ Y.T @ Y)
+            - 2 * jnp.trace(jnpla.inv(prior.resid_var) @ Y.T @ X @ D)
+            + jnp.trace(jnpla.inv(prior.resid_var)) @ X.T @ X @ A
+        )
+        - 0.5 * k * jnp.log(2 * jnp.pi)
+        - 0.5 * n * jnp.log(jnpla.det(prior.resid_var))
+    )
+    return ll
+
+
+def KL_divergence(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
     pass
+
+
+def _compute_elbo(ll: float, kl: float) -> float:
+    cur_elbo = ll - kl
+    return cur_elbo
 
 
 def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
@@ -44,6 +68,7 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, :])
     # TODO: do the CAVI updates for the lth effect
     # update post
+
     R = R_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, :])
 
     return _LResult(R, X, post, prior)
@@ -70,9 +95,11 @@ def _fit_model(
 
 def finemap(Y: ArrayLike, X: ArrayLike, L: int, tol: float = 1e-3, max_iter: int = 100):
     # todo: QC the input data; check dimensions match, etc.
-
-    n, k = Y.shape
-    n, p = X.shape
+    # check dimensions match
+    n_y, k = Y.shape
+    n_x, p = X.shape
+    if n_y != n_x:
+        raise ValueError("Number of individuals do not match: " f"Y is {n_y}x{k}, but X is {n_x}x{p}")
 
     # initialize model parameters
     prior = PriorParams(
@@ -86,6 +113,9 @@ def finemap(Y: ArrayLike, X: ArrayLike, L: int, tol: float = 1e-3, max_iter: int
         prob=prior.prior_prob,
     )
 
+    ll = data_loglikelihood(Y, X, post, prior)
+    kl = KL_divergence(Y, X, post, prior)
+    cur_elbo = _compute_elbo(ll, kl)
     elbo = cur_elbo = -jnp.inf
     for train_iter in range(max_iter):
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)

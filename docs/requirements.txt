@@ -1,6 +1,6 @@
+equinox
 # Install latest version of our dependencies
 jax[cpu]
-equinox
 jinja2
 mkdocs                          # Main documentation generator.
 mkdocs-material                 # Theme
