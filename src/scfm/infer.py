@@ -5,38 +5,33 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.numpy.linalg as jnpla
+import jax.scipy.linalg as jspla
 import jax.scipy.stats as stats
 
 from jaxtyping import Array, ArrayLike
 
+from .divergences import kl_single_effect
+
 
 class PriorParams(eqx.Module):
-    # likelihood params
+    # residual covariance for Y
     resid_var: Array
-    # resid_var: K x K symmetric matrix
 
-    # prior params
+    # prior prob to select variable (p,)
     prob: Array
-    # prob: L x p x 1 matrix
 
-    # prior mean
-    mean: Array
-    # mean: L x p x k matrix of zeros
-
+    # prior mean and variance for each effect over cell types
+    mean_b: Array
     var_b: Array
-    # var_b: L x p x k x k matrix
 
 
 class PosteriorParams(eqx.Module):
-    # variational params
-    mean_b: Array
-    # mean_b: L x p x k x 1 matrix
-
-    var_b: Array
-    # var_b: L x p x k x k matrix
-
+    # posterior prob to select variable (L,p)
     prob: Array
-    # prob: L x p x 1 vector
+
+    # posterior mean and covariance for each effect and variant
+    mean_b: Array  # (L,p,k)
+    var_b: Array  # (L,p,k,k)
 
 
 class _LResult(NamedTuple):
@@ -94,106 +89,68 @@ def _update_post(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, 
     return post
 
 
-def data_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, L: int) -> float:
+def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
     # Evaluate data log likelihood
-    n, k = Y.shape
     n, p = X.shape
+    L, p, k = post.mean_b.shape
 
     # We evaluated E_Q(B) to be a k by k matrix denoted D
-    diagonal = jnp.array([jnp.diag(post.prob[l_index, :]) for l_index in range(L)])
-    D = jnp.einsum("lpp,lpk->pk", diagonal, post.mean_b)
+    B = jnp.sum(post.prob * post.mean_b, axis=0)
 
-    # We evaluated E_Q(B^T * X^T * X * B) to be a k by k matrix denoted A
-    # We first evaluated mu_lj * mu_lj^T denoted as M
+    # Evaluate E_Q[B^T * X^T * X * B]
+    # Evaluate E_Q[B^T B]
+    pred = X @ B
     M = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
-    term1 = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M)
-    term2 = D.T @ X.T @ X @ D
-    A = term1 + term2
+    outer_moment = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M) + pred.T @ pred
+    inv_prec_Yt = jspla.solve(prior.resid_var, Y.T, assume_a="pos")
+    inv_prec_outer_moment = jspla.solve(prior.resid_var, outer_moment, assume_a="pos")
 
-    ll = (
-        -0.5
-        * (
-            jnp.trace(jnpla.inv(prior.resid_var) @ Y.T @ Y)
-            - 2 * jnp.trace(jnpla.inv(prior.resid_var) @ Y.T @ X @ D)
-            + jnp.trace(jnpla.inv(prior.resid_var) @ A)
+    ll = -0.5 * (
+        (
+            jnp.sum(inv_prec_Yt * Y.T)  # tr(inv(Sigma) Y'Y)
+            - 2 * jnp.sum(inv_prec_Yt * pred.T)  # tr(inv(Sigma) Y'X E[B])
+            + jnp.trace(inv_prec_outer_moment)  # tr(inv(Sigma) E[B'X'XB])
         )
-        - 0.5 * k * jnp.log(2 * jnp.pi)
-        - 0.5 * n * jnp.log(jnpla.det(prior.resid_var))
+        + k * jnp.log(2 * jnp.pi)
+        + n * jnpla.slogdet(prior.resid_var)[1]
     )
-    # return loglikelihood, E_Q(B), mu_lj * mu_lj^T, and E_Q(B^T * X^T * X * B) for update prior step
-    return ll, D, M, A
+
+    return ll
 
 
-def KL_MVN(m0: ArrayLike, sigma0: ArrayLike, m1: ArrayLike, sigma1: ArrayLike, k: int) -> float:
-    """
-    for lth effect and jth SNP, evaluate KL distance between two multivariate normal distributions
-    """
-    term1 = jnp.trace(jnpla.inv(sigma1) @ sigma0) - k
-    term2 = (m1 - m0).T @ jnpla.inv(sigma1) @ (m1 - m0)
-    sign1, logdet1 = jnpla.slogdet(sigma1)
-    sign0, logdet0 = jnpla.slogdet(sigma0)
-    term3 = sign1 * logdet1 - sign0 * logdet0
-    kl_mvn = 0.5 * (term1 + term2 + term3)
-    return kl_mvn
+def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> Array:
+    # compute log likelihood and kl distance
+    ll = expected_loglikelihood(Y, X, post, prior)
+    kl = kl_single_effect(prior, post)
 
-
-def KL_Multi(p: ArrayLike, q: ArrayLike) -> float:
-    """
-    for the lth effect and jth SNP, evaluate KL distance between two multinomial distributions
-    """
-    logterm = jnp.log(p) - jnp.log(q)
-    kl_multi = jnp.sum(p * logterm, axis=0)
-    return kl_multi
-
-
-def KL(prior: PriorParams, post: PosteriorParams, L: int, p: int, k: int) -> float:
-    """
-    Sum the KL distance across all l and j for both MVN and Multinomial distributions
-
-    Returns:
-         The total KL distance
-    """
-    total_kl = 0
-    for l_index in range(L):
-        for j in range(p):
-            kl_mvn = KL_MVN(
-                post.mean_b[l_index, j, :],
-                post.var_b[l_index, j, :, :],
-                prior.mean_b[l_index, j, :],
-                prior.var_b[l_index, j, :, :],
-                k,
-            )
-            kl_multi = KL_Multi(post.prob[l_index, j], prior.prob[l_index, j])
-            total_kl = kl_mvn + kl_multi
-
-    return total_kl
-
-
-def _compute_elbo(ll: float, kl: float) -> float:
     # Given the current loglikelihood and kl distance, evaluate the current ELBO
     cur_elbo = ll - kl
+
     return cur_elbo
 
 
-def _fit_lth_effect(l_index: int, params: _LResult, p: int) -> _LResult:
+def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     R, X, post, prior = params
 
-    # R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, :])
+    # R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
     # TODO: do the CAVI updates for the lth effect
 
     # update posterior paramters for lth effect and jth SNP
 
     # update prior parameters for the lth effect and jth SNP
 
+    # update residual for next \ell effect
+    # R = R_l - X @ (update_mean_b * update_prob)
+
     return _LResult(R, X, post, prior)
 
 
 def _fit_model(
     Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
-) -> Tuple[float, PosteriorParams, PriorParams]:
+) -> Tuple[Array, PosteriorParams, PriorParams]:
     L, p, k = post.mean_b.shape
 
-    # update variational parameters
+    # Compute residuals and update model
     R = Y - X @ jnp.sum(post.mean_b * post.prob, axis=0)
     init_params = _LResult(R, X, post, prior)
     _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
@@ -207,7 +164,7 @@ def _fit_model(
     return elbo, post, prior
 
 
-def finemap(Y: ArrayLike, X: ArrayLike, L: int, tol: float = 1e-3, max_iter: int = 100):
+def finemap(Y: ArrayLike, X: ArrayLike, L: int, prior_var: float = 1e-3, tol: float = 1e-3, max_iter: int = 100):
     # todo: QC the input data; check dimensions match, etc.
     # check dimensions match
     n_y, k = Y.shape
@@ -220,22 +177,16 @@ def finemap(Y: ArrayLike, X: ArrayLike, L: int, tol: float = 1e-3, max_iter: int
         resid_var=jnp.ones(k),
         prob=jnp.ones(p) / p,
         mean=jnp.zeros((L, p, k)),
-        var_b=jnp.array([jnp.eye(k) for _ in range(L)]),
+        var_b=jnp.tile(prior_var * jnp.eye(k), (L, 1, 1)),
     )
     post = PosteriorParams(
         mean_b=jnp.zeros((L, p, k)),
         var_b=prior.prior_var_b,
-        prob=prior.prior_prob,
+        prob=jnp.tile(prior.prior_prob, (L, 1)),
     )
 
-    # compute log likelihood and kl distance
-    ll = data_loglikelihood(Y, X, post, prior, L)
-    kl = KL(prior, post, L, p, k)
-
     # evaluate current elbo
-    cur_elbo = _compute_elbo(ll, kl)
     elbo = cur_elbo = -jnp.inf
-
     for train_iter in range(max_iter):
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
         print(f"ELBO[{train_iter}] = {cur_elbo}")
