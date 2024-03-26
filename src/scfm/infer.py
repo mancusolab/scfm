@@ -41,21 +41,11 @@ class _LResult(NamedTuple):
     prior: PriorParams
 
 
-def _update_prior(
-    Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, D: Array, M: Array, A: Array, l_index: int
-) -> PriorParams:
-    n = X.shape(0)
-
-    # Update prior residual variance
-    term1 = jnp.trace(Y.T @ Y)
-    term2 = -2 * jnp.trace(jnp.inv(prior.resid_var) @ Y.T @ X @ D)
-    term3 = jnp.trace(jnp.inv(prior.resid_var @ A))
-    prior.resid_var = 1 / n * (term1 + term2 + term3)
-
+def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
+    M = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
     # Update prior for effect size covariance matrix
     prior_update = jnp.einsum("lj, ljkq->kq", post.prob, M)
     prior.var_b = prior.var_b[l_index, :, :, :].set(prior_update)
-
     return prior
 
 
@@ -89,12 +79,44 @@ def _update_post(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, 
     return post
 
 
+def _update_l(Y: Array, X: Array, prior: PriorParams, post: PosteriorParams, l_index: int):
+    R = Y - X @ jnp.sum(post.mean_b * post.prob, axis=0)
+    R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
+    post_update = _update_post(Y, X, post, prior, l_index)
+    prior_update = _update_prior(Y, X, post, prior, l_index)
+    R = R_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
+    return post_update, prior_update
+
+
+def update_prior_resid_var(prior: PriorParams, post: PosteriorParams, X: Array, Y: Array):
+    """
+    :return:updated prior_resid_var
+    """
+    n = X.shape(0)
+    # Compute some statistics
+    # We evaluated E_Q(B) to be a k by k matrix denoted B
+    B = jnp.sum(post.prob * post.mean_b, axis=0)
+
+    # Evaluate E_Q[B^T * X^T * X * B]
+    # Evaluate E_Q[B^T B]
+    pred = X @ B
+    M = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
+    outer_moment = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M) + pred.T @ pred
+
+    # Update prior residual variance
+    term1 = jnp.trace(Y * Y.T)  # tr(Y^T*Y)
+    term2 = -2 * jnp.trace(Y.T * pred.T)  # -2tr(Y^T*X*E_Q(B))
+    term3 = jnp.trace(outer_moment)  # tr(E_Q[B^T*X^T*X*B])
+    prior.resid_var = 1 / n * (term1 + term2 + term3)
+    return prior.resid_var
+
+
 def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
     # Evaluate data log likelihood
     n, p = X.shape
     L, p, k = post.mean_b.shape
 
-    # We evaluated E_Q(B) to be a k by k matrix denoted D
+    # We evaluated E_Q(B) to be a k by k matrix denoted B
     B = jnp.sum(post.prob * post.mean_b, axis=0)
 
     # Evaluate E_Q[B^T * X^T * X * B]
@@ -129,20 +151,19 @@ def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
     return cur_elbo
 
 
-def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
+def _fit_lth_effect(Y: Array, l_index: int, params: _LResult) -> _LResult:
     R, X, post, prior = params
 
-    # R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
+    resid = Y - X @ jnp.sum(post.mean_b * post.prob, axis=0)
     # TODO: do the CAVI updates for the lth effect
+    init_l_result = _LResult(R=resid, X=X, prior=prior, post=post)
+    l_dim = post.mean_b.shape(0)
+    # update the prior and post params for lth effect
+    update_post, update_prior = lax.fori_loop(0, l_dim, _update_l(Y, X, post, prior, l_index), init_l_result)
 
-    # update posterior paramters for lth effect and jth SNP
+    update_l_result = _LResult(R=resid, X=X, prior=update_prior, post=update_post)
 
-    # update prior parameters for the lth effect and jth SNP
-
-    # update residual for next \ell effect
-    # R = R_l - X @ (update_mean_b * update_prob)
-
-    return _LResult(R, X, post, prior)
+    return update_l_result
 
 
 def _fit_model(
