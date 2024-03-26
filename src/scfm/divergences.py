@@ -9,16 +9,16 @@ from jaxtyping import Array, ArrayLike
 from src.scfm.infer import PosteriorParams, PriorParams
 
 
-def _kl_mvn(m0: ArrayLike, sigma0: ArrayLike, m1: ArrayLike, sigma1: ArrayLike) -> float:
+def _kl_mvn(m0: ArrayLike, sigma0: ArrayLike, sigma1: ArrayLike) -> float:
     """
-    for lth effect and jth SNP, evaluate KL distance between two multivariate normal distributions
+    KL divergence between two multivariate normal distributions assuming prior mean is 0.
     """
     k, k = sigma1.shape
 
     factor = jspla.cho_factor(sigma1)
     term1 = jnp.trace(jspla.cho_solve(factor, sigma0)) - k
 
-    rotated = jspla.solve_triangular(factor[0], (m1 - m0))
+    rotated = jspla.solve_triangular(factor[0], m0)
     term2 = rotated.T @ rotated
 
     _, logdet1 = jnpla.slogdet(sigma1)
@@ -30,7 +30,9 @@ def _kl_mvn(m0: ArrayLike, sigma0: ArrayLike, m1: ArrayLike, sigma1: ArrayLike) 
     return kl_mvn
 
 
-_kl_mvn_vmap = vmap(vmap(_kl_mvn, (0, 0, None, None), 0), (0, 0, None, 0), 0)
+# first vmap is to add dimensions for p variants
+# second vmap is to add dimesions for L effects
+_kl_mvn_vmap = vmap(vmap(_kl_mvn, (0, 0, None), 0), (0, 0, 0), 0)
 
 
 def _kl_discrete(p: ArrayLike, q: ArrayLike) -> Array:
@@ -48,7 +50,7 @@ def kl_single_effect(prior: PriorParams, post: PosteriorParams) -> Array:
          The total KL distance
     """
     # weight each of the KL terms for effects by their respective alphas/probs
-    kl_effects = jnp.sum(post.prob * _kl_mvn_vmap(post.mean_b, post.var_b, prior.mean_b, prior.var_b))
+    kl_effects = jnp.sum(post.prob * _kl_mvn_vmap(post.mean_b, post.var_b, prior.var_b))
     kl_selections = _kl_discrete(post.prob, prior.prob)
     total_kl = kl_effects + kl_selections
 
