@@ -187,7 +187,6 @@ def finemap(Y: ArrayLike, X: ArrayLike, L: int, prior_var: float = 1e-3, tol: fl
     prior = PriorParams(
         resid_var=jnp.ones(k),
         prob=jnp.ones(p) / p,
-        mean=jnp.zeros((L, p, k)),
         var_b=jnp.tile(prior_var * jnp.eye(k), (L, 1, 1)),
     )
     post = PosteriorParams(
