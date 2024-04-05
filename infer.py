@@ -1,5 +1,4 @@
 from typing import NamedTuple, Tuple
-
 import equinox as eqx
 import jax
 import jax.lax as lax
@@ -11,6 +10,8 @@ from jaxtyping import Array, ArrayLike
 
 from .divergences import kl_single_effect
 from .params import PriorParams, PosteriorParams
+# for testing purpose
+from jax import device_get
 
 
 jax.config.update("jax_enable_x64", True)
@@ -185,6 +186,11 @@ def finemap(Y: ArrayLike, X: ArrayLike, L: int, prior_var: float = 1e-3, tol: fl
     for train_iter in range(max_iter):
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
         print(f"ELBO[{train_iter}] = {cur_elbo}")
+        # for testing purpose
+        print(
+            f"prior = PriorParams(resid_var={device_get(prior.resid_var)},\nprob={device_get(prior.prob)},\nvar_b={device_get(prior.var_b)})")
+        print(
+            f"post = PosteriorParams(prob={device_get(post.prob)},\nmean_b={device_get(post.mean_b)},\nvar_b={device_get(post.var_b)})")
         if jnp.fabs(cur_elbo - elbo) < tol:
             print(f"ELBO has converged. ELBO at the last iteration: {cur_elbo}")
             break
