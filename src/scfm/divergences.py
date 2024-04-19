@@ -6,7 +6,7 @@ from jax import vmap
 from jax.scipy.special import xlogy
 from jaxtyping import Array, ArrayLike
 
-from src.scfm.infer import PosteriorParams, PriorParams
+from .params import PosteriorParams, PriorParams
 
 
 def _kl_mvn(m0: ArrayLike, sigma0: ArrayLike, sigma1: ArrayLike) -> float:
