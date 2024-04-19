@@ -1,7 +1,9 @@
 import jax
 import equinox as eqx
 from jaxtyping import Array, ArrayLike
+import jax.numpy as jnp
 
+Array = jnp.ndarray
 class PriorParams(eqx.Module):
     # residual covariance for Y
     resid_var: Array  # (k,k)
@@ -20,3 +22,4 @@ class PosteriorParams(eqx.Module):
     # posterior mean and covariance for each effect and variant
     mean_b: Array  # (L,p,k)
     var_b: Array  # (L,p,k,k)
+
