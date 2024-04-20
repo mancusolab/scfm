@@ -294,7 +294,7 @@ def make_cs(
 
         # randomly select 'max_select' SNPs
         if len(snp_idx) > max_select:
-            snp_idx = rdm.choice(rng_key, snp_idx, shape=(max_select), replace=False)
+            snp_idx = rdm.choice(rng_key, snp_idx, shape=(max_select,), replace=False)
 
         # update genotype data and LD
         ld_X = X[:, snp_idx]
@@ -359,7 +359,6 @@ def finemap(
     prior = PriorParams(
         resid_var=jnp.eye(k),
         prob=jnp.ones(p) / p,
-        # mean=jnp.zeros((L, p, k)),
         var_b=jnp.tile(prior_var * jnp.eye(k), (L, 1, 1)),
     )
 

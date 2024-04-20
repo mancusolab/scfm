@@ -1,5 +1,4 @@
 import equinox as eqx
-
 from jaxtyping import Array
 
 
