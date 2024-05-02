@@ -130,7 +130,6 @@ def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: Pri
     outer_moment = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M) + pred.T @ pred
     inv_prec_Yt = jspla.solve(prior.resid_var, Y.T, assume_a="pos")
     inv_prec_outer_moment = jspla.solve(prior.resid_var, outer_moment, assume_a="pos")
-
     ll = -0.5 * (
         (
             jnp.sum(inv_prec_Yt * Y.T)  # tr(inv(Sigma) Y'Y)
@@ -189,7 +188,7 @@ def _fit_model(
     return elbo, post, prior
 
 
-def _reorder_l(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
+def _reorder_l_r(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
     frob_norm = jnp.sum(jnp.linalg.svd(posteriors.var_b, compute_uv=False), axis=1)
 
     # we want to reorder them based on the Frobenius norm
@@ -208,6 +207,25 @@ def _reorder_l(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[PriorP
 
     return new_priors, new_posteriors, l_order
 
+def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
+
+    frob_norm = jnp.sum(
+        jnp.linalg.svd(post.var_b, compute_uv=False), axis=1
+    )
+
+    # we want to reorder them based on the Frobenius norm
+    l_order = jnp.argsort(-frob_norm)
+
+    # priors effect_covar
+    prior = prior._replace(var_b=prior.var_b[l_order])
+
+    posteriors = post._replace(
+        prob=post.prob[l_order],
+        mean_b=post.mean_b[l_order],
+        var_b=post.var_b[l_order]
+    )
+
+    return prior, post, l_order
 
 def make_pip(alpha: ArrayLike) -> Array:
     """The function to calculate posterior inclusion probability (PIP).
@@ -264,6 +282,7 @@ def make_cs(
         tmp_pd = t_alpha[["index", ldx]].sort_values(ldx, ascending=False).reset_index(drop=True)
         tmp_pd["csum"] = tmp_pd[[ldx]].cumsum()
         n_row = tmp_pd[tmp_pd.csum < threshold].shape[0]
+
 
         if n_row == tmp_pd.shape[0]:
             select_idx = jnp.arange(n_row)
@@ -382,10 +401,11 @@ def finemap(
         # Update the last ELBO to the current ELBO at the end of the iteration
         elbo = cur_elbo
 
+    ###bug
     l_order = jnp.arange(L)
     if not no_reorder:
         prior, post, l_order = _reorder_l(prior, post)
-
+    ###bug
     # Fine-mapping
     cs, full_alphas, pip_all, pip_cs = make_cs(
         post.prob,

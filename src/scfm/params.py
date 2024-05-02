@@ -1,8 +1,8 @@
-import equinox as eqx
+#import equinox as eqx
 from jaxtyping import Array
+from typing import NamedTuple, Tuple
 
-
-class PriorParams(eqx.Module):
+class PriorParams(NamedTuple):
     # residual covariance for Y
     resid_var: Array  # (k,k)
 
@@ -13,7 +13,7 @@ class PriorParams(eqx.Module):
     var_b: Array  # (L,k,k)
 
 
-class PosteriorParams(eqx.Module):
+class PosteriorParams(NamedTuple):
     # posterior prob to select variable (L,p)
     prob: Array  # (L,p)
 
