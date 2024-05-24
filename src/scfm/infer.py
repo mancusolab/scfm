@@ -12,7 +12,7 @@ import jax.scipy.stats as stats
 
 from jaxtyping import Array, ArrayLike
 
-from . import log
+#from . import log
 from .divergences import kl_single_effect
 from .params import PosteriorParams, PriorParams
 
@@ -24,6 +24,7 @@ jax.config.update("jax_default_matmul_precision", "highest")
 class _LResult(NamedTuple):
     resid: Array
     X: Array
+    Y: Array
     post: PosteriorParams
     prior: PriorParams
 
@@ -155,29 +156,32 @@ def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
 
 
 def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
-    R, X, post, prior = params
+    resid, X, Y, post, prior = params
 
     # TODO: do the CAVI updates for the lth effect
-    R_l = R + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
+    resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
-    # update posterior paramters for lth effect and jth SNP
-    post = _update_post(R_l, X, post, prior, l_index)
+    # update prior
+    prior = _update_prior(Y, X, post, prior)
+
+    # update posterior parameters for lth effect and jth SNP
+    post = _update_post(resid_l, X, post, prior, l_index)
 
     # update residual for next \ell effect
-    R = R_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
+    resid = resid_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
-    return _LResult(R, X, post, prior)
+    return _LResult(resid, X, Y, post, prior)
 
 
 def _fit_model(
-    Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
+        Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
 ) -> tuple[Array, PosteriorParams, PriorParams]:
     L, p, k = post.mean_b.shape
-
     # Compute residuals and update model
-    R = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
-    init_params = _LResult(R, X, post, prior)
-    _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
+    resid = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
+    init_params = _LResult(resid, X, Y, post, prior)
+
+    _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
 
     # update prior (i.e. resid_var)
     # prior = _update_prior(Y, X, post, prior)
@@ -350,10 +354,10 @@ def make_cs(
     full_alphas["pip_cs"] = pip_cs
     full_alphas = full_alphas.rename(columns={"index": "SNPIndex"})
 
-    log.logger.info(
-        f"{len(cs.CSIndex.unique())} out of {L} credible sets remain after pruning based on purity ({purity})."
-        + " For detailed results, specify --alphas."
-    )
+    #log.logger.info(
+        #f"{len(cs.CSIndex.unique())} out of {L} credible sets remain after pruning based on purity ({purity})."
+        #+ " For detailed results, specify --alphas."
+    #)
 
     return cs, full_alphas, pip_all, pip_cs
 
@@ -392,6 +396,7 @@ def finemap(
     elbo_increase = True
     for train_iter in range(max_iter):
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
+        print(f"iteration: {train_iter}, prior: {prior}")
         print(f"ELBO[{train_iter}] = {cur_elbo}")
 
         if jnp.fabs(cur_elbo - elbo) < tol:
