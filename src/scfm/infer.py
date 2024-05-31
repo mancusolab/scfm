@@ -10,9 +10,10 @@ import jax.random as rdm
 import jax.scipy.linalg as jspla
 import jax.scipy.stats as stats
 
+
 from jaxtyping import Array, ArrayLike
 
-#from . import log
+from . import log
 from .divergences import kl_single_effect
 from .params import PosteriorParams, PriorParams
 
