@@ -78,7 +78,7 @@ def _update_post(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams
     return post
 
 
-def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> PriorParams:
+def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
     """
     :return:updated prior_resid_var
     """
@@ -86,18 +86,18 @@ def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
     n, p = X.shape
 
     # Update prior for effect size covariance matrix
-    tmp = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
-    prior_covar_b = jnp.einsum("lj,ljkq->lkq", post.prob, tmp)
+    tmp = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
+    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], tmp)
 
     # Compute some statistics
     # We evaluated E_Q(B) to be a k by k matrix denoted B
-    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
+    B = jnp.einsum("p,pk->pk", post.prob[l_index], post.mean_b[l_index])
 
     # Evaluate E_Q[B^T * X^T * X * B]
     # Evaluate E_Q[B^T B]
     pred = X @ B
-    M = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
-    outer_moment = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M) + pred.T @ pred
+    M = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
+    outer_moment = jnp.einsum("nj, nj, j, jkq->kq", X, X, post.prob[l_index], M) + pred.T @ pred
     # Update prior residual variance
     # term1 = jnp.sum(Y * Y)  # tr(Y^T*Y)
     term1 = Y.T @ Y
@@ -107,11 +107,12 @@ def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
     term3 = outer_moment
 
     resid_var = (term1 + term2 + term3) / n
+    
 
     prior = PriorParams(
-        resid_var,
-        prior.prob,
-        prior_covar_b,
+        resid_var = resid_var,
+        prob = prior.prob,
+        var_b = prior.var_b.at[l_index].set(prior_covar_b),
     )
 
     return prior
@@ -163,7 +164,7 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
     # update prior
-    prior = _update_prior(Y, X, post, prior)
+    prior = _update_prior(Y, X, post, prior, l_index)
 
     # update posterior parameters for lth effect and jth SNP
     post = _update_post(resid_l, X, post, prior, l_index)
@@ -182,7 +183,9 @@ def _fit_model(
     resid = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
     init_params = _LResult(resid, X, Y, post, prior)
 
+    
     _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
+
 
     # update prior (i.e. resid_var)
     # prior = _update_prior(Y, X, post, prior)
@@ -215,14 +218,16 @@ def _reorder_l_r(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[Prio
 def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
 
     frob_norm = jnp.sum(
-        jnp.linalg.svd(post.var_b, compute_uv=False), axis=1
+        jnp.linalg.svd(prior.var_b, compute_uv=False), axis=1
     )
 
     # we want to reorder them based on the Frobenius norm
     l_order = jnp.argsort(-frob_norm)
 
+
     # priors effect_covar
     prior = prior._replace(var_b=prior.var_b[l_order])
+    
 
     posteriors = post._replace(
         prob=post.prob[l_order],
@@ -392,6 +397,7 @@ def finemap(
         prob=jnp.tile(prior.prob, (L, 1)),
     )
 
+  
     # evaluate current elbo
     elbo = -jnp.inf
     elbo_increase = True
@@ -408,9 +414,12 @@ def finemap(
         elbo = cur_elbo
 
     ###bug
+     
     l_order = jnp.arange(L)
     if not no_reorder:
         prior, post, l_order = _reorder_l(prior, post)
+    
+    
     ###bug
     # Fine-mapping
     cs, full_alphas, pip_all, pip_cs = make_cs(
