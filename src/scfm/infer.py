@@ -10,7 +10,6 @@ import jax.random as rdm
 import jax.scipy.linalg as jspla
 import jax.scipy.stats as stats
 
-
 from jaxtyping import Array, ArrayLike
 
 from . import log
@@ -78,7 +77,7 @@ def _update_post(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams
     return post
 
 
-def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
+def _update_prior_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
     """
     :return:updated prior_resid_var
     """
@@ -86,18 +85,31 @@ def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams,
     n, p = X.shape
 
     # Update prior for effect size covariance matrix
-    tmp = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
-    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], tmp)
+    M = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
+    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], M)
+
+    prior = prior._replace(
+        var_b=prior.var_b.at[l_index].set(prior_covar_b),
+    )
+
+    return prior
+
+
+def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> PriorParams:
+    n, p = X.shape
 
     # Compute some statistics
     # We evaluated E_Q(B) to be a k by k matrix denoted B
-    B = jnp.einsum("p,pk->pk", post.prob[l_index], post.mean_b[l_index])
+    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
 
     # Evaluate E_Q[B^T * X^T * X * B]
     # Evaluate E_Q[B^T B]
     pred = X @ B
-    M = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
-    outer_moment = jnp.einsum("nj, nj, j, jkq->kq", X, X, post.prob[l_index], M) + pred.T @ pred
+    M = jnp.einsum("lpk,lpq,lp->pkq", post.mean_b, post.mean_b, post.prob) + jnp.einsum(
+        "lp,lpkq->pkq", post.prob, post.var_b
+    )
+    outer_moment = jnp.einsum("nj,nj,jkq->kq", X, X, M) + pred.T @ pred
+
     # Update prior residual variance
     # term1 = jnp.sum(Y * Y)  # tr(Y^T*Y)
     term1 = Y.T @ Y
@@ -107,12 +119,9 @@ def _update_prior(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams,
     term3 = outer_moment
 
     resid_var = (term1 + term2 + term3) / n
-    
 
-    prior = PriorParams(
-        resid_var = resid_var,
-        prob = prior.prob,
-        var_b = prior.var_b.at[l_index].set(prior_covar_b),
+    prior = prior._replace(
+        resid_var=resid_var,
     )
 
     return prior
@@ -163,11 +172,11 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     # TODO: do the CAVI updates for the lth effect
     resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
-    # update prior
-    prior = _update_prior(Y, X, post, prior, l_index)
-
     # update posterior parameters for lth effect and jth SNP
     post = _update_post(resid_l, X, post, prior, l_index)
+
+    # update prior
+    prior = _update_prior_covar(Y, X, post, prior, l_index)
 
     # update residual for next \ell effect
     resid = resid_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
@@ -176,19 +185,18 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
 
 
 def _fit_model(
-        Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
+    Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
 ) -> tuple[Array, PosteriorParams, PriorParams]:
     L, p, k = post.mean_b.shape
+
     # Compute residuals and update model
     resid = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
     init_params = _LResult(resid, X, Y, post, prior)
 
-    
     _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
 
-
     # update prior (i.e. resid_var)
-    # prior = _update_prior(Y, X, post, prior)
+    prior = _update_resid_covar(Y, X, post, prior)
 
     # compute ELBO
     elbo = _compute_elbo(Y, X, post, prior)
@@ -215,27 +223,20 @@ def _reorder_l_r(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[Prio
 
     return new_priors, new_posteriors, l_order
 
-def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
 
-    frob_norm = jnp.sum(
-        jnp.linalg.svd(prior.var_b, compute_uv=False), axis=1
-    )
+def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
+    frob_norm = jnp.sum(jnp.linalg.svd(prior.var_b, compute_uv=False), axis=1)
 
     # we want to reorder them based on the Frobenius norm
     l_order = jnp.argsort(-frob_norm)
 
-
     # priors effect_covar
     prior = prior._replace(var_b=prior.var_b[l_order])
-    
 
-    posteriors = post._replace(
-        prob=post.prob[l_order],
-        mean_b=post.mean_b[l_order],
-        var_b=post.var_b[l_order]
-    )
+    post = post._replace(prob=post.prob[l_order], mean_b=post.mean_b[l_order], var_b=post.var_b[l_order])
 
     return prior, post, l_order
+
 
 def make_pip(alpha: ArrayLike) -> Array:
     """The function to calculate posterior inclusion probability (PIP).
@@ -292,7 +293,6 @@ def make_cs(
         tmp_pd = t_alpha[["index", ldx]].sort_values(ldx, ascending=False).reset_index(drop=True)
         tmp_pd["csum"] = tmp_pd[[ldx]].cumsum()
         n_row = tmp_pd[tmp_pd.csum < threshold].shape[0]
-
 
         if n_row == tmp_pd.shape[0]:
             select_idx = jnp.arange(n_row)
@@ -360,10 +360,10 @@ def make_cs(
     full_alphas["pip_cs"] = pip_cs
     full_alphas = full_alphas.rename(columns={"index": "SNPIndex"})
 
-    #log.logger.info(
-        #f"{len(cs.CSIndex.unique())} out of {L} credible sets remain after pruning based on purity ({purity})."
-        #+ " For detailed results, specify --alphas."
-    #)
+    # log.logger.info(
+    # f"{len(cs.CSIndex.unique())} out of {L} credible sets remain after pruning based on purity ({purity})."
+    # + " For detailed results, specify --alphas."
+    # )
 
     return cs, full_alphas, pip_all, pip_cs
 
@@ -397,7 +397,6 @@ def finemap(
         prob=jnp.tile(prior.prob, (L, 1)),
     )
 
-  
     # evaluate current elbo
     elbo = -jnp.inf
     elbo_increase = True
@@ -414,12 +413,11 @@ def finemap(
         elbo = cur_elbo
 
     ###bug
-     
+
     l_order = jnp.arange(L)
     if not no_reorder:
         prior, post, l_order = _reorder_l(prior, post)
-    
-    
+
     ###bug
     # Fine-mapping
     cs, full_alphas, pip_all, pip_cs = make_cs(

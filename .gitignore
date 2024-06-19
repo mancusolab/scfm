@@ -9,6 +9,8 @@ my_local/*
 # C extensions
 *.so
 
+src/scfm/_version.py
+
 # Distribution / packaging
 .Python
 build/
