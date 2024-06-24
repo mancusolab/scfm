@@ -76,6 +76,33 @@ def _update_post(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams
 
     return post
 
+def _update_prior_covar_2(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
+    """
+    :return:updated prior_resid_var
+    followed Zeyun's style
+    """
+    n, k = R_l.shape
+
+    XtX = jnp.sum(X * X, axis=0)
+
+    # p, k, k
+    prior_prec = jnpla.inv(prior.var_b[l_index])
+    resid_prec = jnpla.inv(prior.resid_var)
+    post_prec = resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec
+    post_cov = jnpla.inv(post_prec)
+    post_mean = jnp.einsum("pkq,qk,nk,np->pk", post_cov, resid_prec, R_l, X)
+
+    n, p = X.shape
+
+    # Update prior for effect size covariance matrix
+    M = jnp.einsum("pk, pq->pkq", post_mean, post_mean) + post_cov
+    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], M)
+
+    prior = prior._replace(
+        var_b=prior.var_b.at[l_index].set(prior_covar_b),
+    )
+
+    return prior
 
 def _update_prior_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
     """
@@ -171,12 +198,15 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
 
     # TODO: do the CAVI updates for the lth effect
     resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
-
+    
+    # update prior 
+    prior = _update_prior_covar_2(resid_l, X, post, prior, l_index)
+    
     # update posterior parameters for lth effect and jth SNP
     post = _update_post(resid_l, X, post, prior, l_index)
 
     # update prior
-    prior = _update_prior_covar(Y, X, post, prior, l_index)
+    #prior = _update_prior_covar(Y, X, post, prior, l_index)
 
     # update residual for next \ell effect
     resid = resid_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
@@ -191,6 +221,7 @@ def _fit_model(
 
     # Compute residuals and update model
     resid = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
+   
     init_params = _LResult(resid, X, Y, post, prior)
 
     _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
@@ -404,7 +435,7 @@ def finemap(
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
         print(f"iteration: {train_iter}, prior: {prior}")
         print(f"ELBO[{train_iter}] = {cur_elbo}")
-
+        print("We are using SCFM Jun 20 Version!")
         if jnp.fabs(cur_elbo - elbo) < tol:
             print(f"ELBO has converged. ELBO at the last iteration: {cur_elbo}")
             break
