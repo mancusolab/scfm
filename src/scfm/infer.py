@@ -53,73 +53,46 @@ class SCFMResult(NamedTuple):
     l_order: Array
 
 
-def _update_post(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PosteriorParams:
-    n, k = R_l.shape
-
-    XtX = jnp.sum(X * X, axis=0)
-
-    # p, k, k
-    prior_prec = jnpla.inv(prior.var_b[l_index])
-    resid_prec = jnpla.inv(prior.resid_var)
-    post_prec = resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec
-    post_cov = jnpla.inv(post_prec)
-    post_mean = jnp.einsum("pkq,qk,nk,np->pk", post_cov, resid_prec, R_l, X)
-
-    # Update the post.prob
-    alpha = jax.nn.softmax(jnp.log(prior.prob) - stats.multivariate_normal.logpdf(post_mean, jnp.zeros(k), post_cov))
-    # update the data structure
-    post = PosteriorParams(
-        prob=post.prob.at[l_index].set(alpha),
-        mean_b=post.mean_b.at[l_index, :, :].set(post_mean),
-        var_b=post.var_b.at[l_index].set(post_cov[l_index]),
-    )
-
-    return post
-
-def _update_prior_covar_2(R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
+def _update_lth_params(
+    R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int
+) -> tuple[PriorParams, PosteriorParams]:
     """
     :return:updated prior_resid_var
     followed Zeyun's style
     """
     n, k = R_l.shape
+    n, p = X.shape
 
     XtX = jnp.sum(X * X, axis=0)
 
-    # p, k, k
+    # k,k
     prior_prec = jnpla.inv(prior.var_b[l_index])
     resid_prec = jnpla.inv(prior.resid_var)
-    post_prec = resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec
-    post_cov = jnpla.inv(post_prec)
-    post_mean = jnp.einsum("pkq,qk,nk,np->pk", post_cov, resid_prec, R_l, X)
 
-    n, p = X.shape
+    # p,k,k
+    post_cov = jnpla.inv(resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec)
+    rTXSigInv = (resid_prec @ R_l.T) @ X
+    post_mean = jnp.einsum("pkq,qp->pk", post_cov, rTXSigInv)
+
+    # p,
+    alpha = jax.nn.softmax(jnp.log(prior.prob) - stats.multivariate_normal.logpdf(post_mean, jnp.zeros(k), post_cov))
 
     # Update prior for effect size covariance matrix
-    M = jnp.einsum("pk, pq->pkq", post_mean, post_mean) + post_cov
-    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], M)
+    post_mean_sq = jnp.einsum("pk,pq->pkq", post_mean, post_mean) + post_cov
+    prior_covar_b = jnp.einsum("p,pkq->kq", alpha, post_mean_sq)
 
     prior = prior._replace(
         var_b=prior.var_b.at[l_index].set(prior_covar_b),
     )
 
-    return prior
-
-def _update_prior_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int) -> PriorParams:
-    """
-    :return:updated prior_resid_var
-    """
-
-    n, p = X.shape
-
-    # Update prior for effect size covariance matrix
-    M = jnp.einsum("pk, pq->pkq", post.mean_b[l_index], post.mean_b[l_index]) + post.var_b[l_index]
-    prior_covar_b = jnp.einsum("j,jkq->kq", post.prob[l_index], M)
-
-    prior = prior._replace(
-        var_b=prior.var_b.at[l_index].set(prior_covar_b),
+    # update the data structure
+    post = PosteriorParams(
+        prob=post.prob.at[l_index].set(alpha),
+        mean_b=post.mean_b.at[l_index, :, :].set(post_mean),
+        var_b=post.var_b.at[l_index].set(post_cov),
     )
 
-    return prior
+    return prior, post
 
 
 def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> PriorParams:
@@ -198,15 +171,15 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
 
     # TODO: do the CAVI updates for the lth effect
     resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
-    
-    # update prior 
-    prior = _update_prior_covar_2(resid_l, X, post, prior, l_index)
-    
-    # update posterior parameters for lth effect and jth SNP
-    post = _update_post(resid_l, X, post, prior, l_index)
 
     # update prior
-    #prior = _update_prior_covar(Y, X, post, prior, l_index)
+    prior, _ = _update_lth_params(resid_l, X, post, prior, l_index)
+
+    # update posterior parameters for lth effect and jth SNP
+    _, post = _update_lth_params(resid_l, X, post, prior, l_index)
+
+    # update prior
+    # prior = _update_prior_covar(Y, X, post, prior, l_index)
 
     # update residual for next \ell effect
     resid = resid_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
@@ -221,7 +194,7 @@ def _fit_model(
 
     # Compute residuals and update model
     resid = Y - X @ jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
-   
+
     init_params = _LResult(resid, X, Y, post, prior)
 
     _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
