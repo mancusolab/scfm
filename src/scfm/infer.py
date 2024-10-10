@@ -40,8 +40,8 @@ class SCFMResult(NamedTuple):
     elbo: the final ELBO
     elbo_increase: A boolean to indicate whether ELBO increases during the optimizations
     l_order: the orginal order that scfm infers
+    lfsr: the local false sign rate at each SNP for each cell type
     """
-
     prior: PriorParams
     post: PosteriorParams
     pip_all: Array
@@ -51,6 +51,7 @@ class SCFMResult(NamedTuple):
     elbo: Array
     elbo_increase: bool
     l_order: Array
+    lsfr: Array
 
 
 def _update_lth_params(
@@ -371,6 +372,68 @@ def make_cs(
 
     return cs, full_alphas, pip_all, pip_cs
 
+# Define calculate lsfr
+# Calculate lfdr (local false discovery rate)
+def cal_lfdr(alpha: ArrayLike) -> Array:  
+
+    # Calculate the product across all L effects
+    lfdr  = jnp.prod(1 - alpha, axis=1)
+
+    # lfdr will be in the shape (p,)
+    return lfdr
+
+def cal_pos_prob(alpha: ArrayLike, post: PosteriorParams) -> Array:
+
+    # part a
+    # alpha is in the shape (L, p)
+    # extend part_a to be the shape (L, p, 1) for broadcasting
+    part_a = alpha[:, :, jnp.newaxis]
+
+    # part b
+    posterior_std = jnp.sqrt(jnp.diagonal(post.var_b, axis1=-2, axis2=-1))
+    # calculate z-scores
+    z_scores = - post.mean_b / posterior_std
+    # calculate positive probabilities 
+    part_b = 1 - stats.norm.cdf(z_scores)
+    # z_scores is in the shape (L, p, k)
+    # z score for in each effect each SNP on each cell type
+    tmp = part_a * part_b
+    pos_prob = jnp.prod(tmp, axis=1)
+    # post_prob will be in the shape (p, k)
+    return pos_prob
+
+   
+def cal_neg_prob(alpha: ArrayLike, post: PosteriorParams) -> Array:
+    # part a
+    # alpha is in the shape (L, p)
+    # extend part_a to be the shape (L, p, 1) for broadcasting
+    part_a = alpha[:, :, jnp.newaxis]
+
+    # part b
+    posterior_std = jnp.sqrt(jnp.diagonal(post.var_b, axis1=-2, axis2=-1))
+    # calculate z-scores
+    z_scores = - post.mean_b / posterior_std
+    # calculate negative probabilities 
+    part_b = stats.norm.cdf(z_scores)
+    # z_scores is in the shape (L, p, k)
+    # z score for in each effect each SNP on each cell type
+    tmp = part_a * part_b
+    neg_prob = jnp.prod(tmp, axis=1)
+    # neg_prob will be in the shape (p, k)
+    return neg_prob
+
+def cal_lfsr(lfdr: Array, pos_prob: Array, neg_prob: Array) -> Array:
+    # extend the dimension for broadcasting
+    zero_prob = lfdr[:, jnp.newaxis]
+
+    non_neg_prob = zero_prob + pos_prob
+
+    non_pos_prob = zero_prob + neg_prob
+
+    lfsr = min(non_neg_prob, non_pos_prob)
+    # lsfr will be in the shape (p, k) 
+    # representing the lfsr for each SNP on each cell type
+    return lfsr
 
 def finemap(
     Y: ArrayLike,
@@ -416,13 +479,11 @@ def finemap(
         # Update the last ELBO to the current ELBO at the end of the iteration
         elbo = cur_elbo
 
-    ###bug
 
     l_order = jnp.arange(L)
     if not no_reorder:
         prior, post, l_order = _reorder_l(prior, post)
 
-    ###bug
     # Fine-mapping
     cs, full_alphas, pip_all, pip_cs = make_cs(
         post.prob,
@@ -433,4 +494,18 @@ def finemap(
         seed=12345,
     )
 
-    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order)
+    # Calculate lsfr
+    lfdr = cal_lfdr(post.prob)
+    pos_prob = cal_pos_prob(post.prob, post)
+    neg_prob = cal_neg_prob(post.prob, post)
+    lfsr = cal_lfsr(lfdr, pos_prob, neg_prob)
+
+
+    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, lfsr)
+
+
+
+    
+
+
+
