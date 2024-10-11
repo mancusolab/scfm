@@ -430,7 +430,7 @@ def cal_lfsr(lfdr: Array, pos_prob: Array, neg_prob: Array) -> Array:
 
     non_pos_prob = zero_prob + neg_prob
 
-    lfsr = min(non_neg_prob, non_pos_prob)
+    lfsr = jnp.minimum(non_neg_prob, non_pos_prob)
     # lsfr will be in the shape (p, k) 
     # representing the lfsr for each SNP on each cell type
     return lfsr
