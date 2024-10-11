@@ -398,7 +398,7 @@ def cal_pos_prob(alpha: ArrayLike, post: PosteriorParams) -> Array:
     # z_scores is in the shape (L, p, k)
     # z score for in each effect each SNP on each cell type
     tmp = part_a * part_b
-    pos_prob = jnp.prod(tmp, axis=1)
+    pos_prob = jnp.prod(tmp, axis=0)
     # post_prob will be in the shape (p, k)
     return pos_prob
 
@@ -418,7 +418,7 @@ def cal_neg_prob(alpha: ArrayLike, post: PosteriorParams) -> Array:
     # z_scores is in the shape (L, p, k)
     # z score for in each effect each SNP on each cell type
     tmp = part_a * part_b
-    neg_prob = jnp.prod(tmp, axis=1)
+    neg_prob = jnp.prod(tmp, axis=0)
     # neg_prob will be in the shape (p, k)
     return neg_prob
 
