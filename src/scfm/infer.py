@@ -51,7 +51,7 @@ class SCFMResult(NamedTuple):
     elbo: Array
     elbo_increase: bool
     l_order: Array
-    lsfr: Array
+    lfsr: Array
 
 
 def _update_lth_params(
@@ -377,7 +377,7 @@ def make_cs(
 def cal_lfdr(alpha: ArrayLike) -> Array:  
 
     # Calculate the product across all L effects
-    lfdr  = jnp.prod(1 - alpha, axis=1)
+    lfdr  = jnp.prod(1 - alpha, axis=0)
 
     # lfdr will be in the shape (p,)
     return lfdr
