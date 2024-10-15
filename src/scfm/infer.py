@@ -426,7 +426,7 @@ def cal_lfsr(post: PosteriorParams) -> Array:
     pos_prob = cal_pos_prob(post)
     neg_prob = cal_neg_prob(post)
     # extend the dimension for broadcasting
-    zero_prob = lfdr[:, jnp.newaxis]
+    zero_prob = lfdr[:, :, jnp.newaxis]
 
     non_neg_prob = zero_prob + pos_prob
 
