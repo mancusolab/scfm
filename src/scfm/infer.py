@@ -440,25 +440,6 @@ def cal_lfsr(post: PosteriorParams) -> Array:
     # representing the lfsr for each SNP on each cell type
     return lfsr
 
-
-def cal_lfsr_global(post: PosteriorParams) -> Array:
-    lfdr = 1 - post.prob
-    pos_prob = cal_pos_prob(post)
-    neg_prob = cal_neg_prob(post)
-    # extend the dimension for broadcasting
-    zero_prob = lfdr[:, :, jnp.newaxis]
-
-    non_neg_prob = zero_prob + pos_prob
-
-    non_pos_prob = zero_prob + neg_prob
-
-    lfsr = jnp.minimum(non_neg_prob, non_pos_prob)
-
-    lsfr_global = -jnp.expm1(jnp.sum(jnp.log1p(-lfsr), axis=0))
-
-    return lsfr_global
-
-
 def finemap(
     Y: ArrayLike,
     X: ArrayLike,
@@ -518,6 +499,6 @@ def finemap(
     )
 
     # Calculate lsfr
-    lfsr = cal_lfsr_global(post)
+    lfsr = cal_lfsr(post)
 
     return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, lfsr)
