@@ -1,3 +1,4 @@
+from functools import partial
 from typing import NamedTuple, Tuple
 
 import pandas as pd
@@ -55,6 +56,7 @@ class SCFMResult(NamedTuple):
     lfsr: Array
 
 
+@jax.jit
 def _update_lth_params(
     R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int
 ) -> tuple[PriorParams, PosteriorParams]:
@@ -97,6 +99,7 @@ def _update_lth_params(
     return prior, post
 
 
+@jax.jit
 def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> PriorParams:
     n, p = X.shape
 
@@ -129,6 +132,7 @@ def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorP
     return prior
 
 
+@jax.jit
 def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
     # Evaluate data log likelihood
     n, p = X.shape
@@ -157,6 +161,7 @@ def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: Pri
     return ll
 
 
+@jax.jit
 def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> Array:
     # compute log likelihood and kl distance
     ll = expected_loglikelihood(Y, X, post, prior)
@@ -168,6 +173,7 @@ def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
     return cur_elbo
 
 
+@partial(jax.jit, static_argnums=(0,))
 def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     resid, X, Y, post, prior = params
 
@@ -189,6 +195,7 @@ def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     return _LResult(resid, X, Y, post, prior)
 
 
+@jax.jit
 def _fit_model(
     Y: Array, X: Array, post: PosteriorParams, prior: PriorParams
 ) -> tuple[Array, PosteriorParams, PriorParams]:
@@ -210,26 +217,7 @@ def _fit_model(
     return elbo, post, prior
 
 
-def _reorder_l_r(priors: PriorParams, posteriors: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
-    frob_norm = jnp.sum(jnp.linalg.svd(posteriors.var_b, compute_uv=False), axis=1)
-
-    # we want to reorder them based on the Frobenius norm
-    l_order = jnp.argsort(-frob_norm)
-    l_order = l_order.reshape(-1)
-
-    new_priors = PriorParams(
-        resid_var=priors.resid_var,  # Assuming resid_var does not need reordering
-        prob=priors.prob,  # Assuming prob does not need reordering
-        var_b=priors.var_b[l_order, :],  # Only var_b is reordered
-    )
-
-    new_posteriors = PosteriorParams(
-        prob=posteriors.prob[l_order, :], mean_b=posteriors.mean_b[l_order, :], var_b=posteriors.var_b[l_order, :]
-    )
-
-    return new_priors, new_posteriors, l_order
-
-
+@jax.jit
 def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, PosteriorParams, Array]:
     frob_norm = jnp.sum(jnp.linalg.svd(prior.var_b, compute_uv=False), axis=1)
 
@@ -244,6 +232,7 @@ def _reorder_l(prior: PriorParams, post: PosteriorParams) -> Tuple[PriorParams, 
     return prior, post, l_order
 
 
+@jax.jit
 def make_pip(alpha: ArrayLike) -> Array:
     """The function to calculate posterior inclusion probability (PIP).
 
@@ -377,6 +366,7 @@ def make_cs(
 # Define calculate lsfr
 
 
+@jax.jit
 def cal_pos_prob(post: PosteriorParams) -> Array:
     # part a
     # alpha is in the shape (L, p)
@@ -399,6 +389,7 @@ def cal_pos_prob(post: PosteriorParams) -> Array:
     return pos_prob
 
 
+@jax.jit
 def cal_neg_prob(post: PosteriorParams) -> Array:
     # part a
     # alpha is in the shape (L, p)
@@ -419,6 +410,7 @@ def cal_neg_prob(post: PosteriorParams) -> Array:
     return neg_prob
 
 
+@jax.jit
 def cal_lfsr(post: PosteriorParams) -> Array:
     # calculate lfdr (local false discovery rate)
     lfdr = 1 - post.prob
@@ -439,6 +431,7 @@ def cal_lfsr(post: PosteriorParams) -> Array:
     # lsfr will be in the shape (p, k)
     # representing the lfsr for each SNP on each cell type
     return lfsr
+
 
 def finemap(
     Y: ArrayLike,
