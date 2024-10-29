@@ -497,9 +497,9 @@ def finemap(
     # Calculate lfsr
     lfsr = cal_lfsr(post)
     # Calculate lfsr for CS
-    cs_lfsr = pd.DataFrame(result.cs["SNPIndex"])
+    cs_lfsr = pd.DataFrame(cs["SNPIndex"])
     snp_indices = cs_lfsr["SNPIndex"].to_numpy()
-    matched_rows = jnp.array([result.lfsr[i] for i in snp_indices])
+    matched_rows = jnp.array([lfsr[i] for i in snp_indices])
     column_names = [f"celltype{i}" for i in range(1, 10)]
     matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
     cs_lfsr = pd.concat([cs_lfsr, matched_rows_df], axis=1)
