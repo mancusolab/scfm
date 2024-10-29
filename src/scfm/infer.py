@@ -42,6 +42,7 @@ class SCFMResult(NamedTuple):
     elbo_increase: A boolean to indicate whether ELBO increases during the optimizations
     l_order: the orginal order that scfm infers
     lfsr: the local false sign rate at each SNP for each cell type
+    cs_lfsr: the local false sign rate at SNP for each cell type in CS
     """
 
     prior: PriorParams
@@ -54,6 +55,7 @@ class SCFMResult(NamedTuple):
     elbo_increase: bool
     l_order: Array
     lfsr: Array
+    cs_lfsr: pd.DataFrame
 
 
 @jax.jit
@@ -433,6 +435,7 @@ def cal_lfsr(post: PosteriorParams) -> Array:
     return lfsr
 
 
+
 def finemap(
     Y: ArrayLike,
     X: ArrayLike,
@@ -491,7 +494,15 @@ def finemap(
         seed=12345,
     )
 
-    # Calculate lsfr
+    # Calculate lfsr
     lfsr = cal_lfsr(post)
+    # Calculate lfsr for CS
+    cs_lfsr = pd.DataFrame(result.cs["SNPIndex"])
+    snp_indices = cs_lfsr["SNPIndex"].to_numpy()
+    matched_rows = jnp.array([result.lfsr[i] for i in snp_indices])
+    column_names = [f"celltype{i}" for i in range(1, 10)]
+    matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
+    cs_lfsr = pd.concat([cs_lfsr, matched_rows_df], axis=1)
+    
 
-    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, lfsr)
+    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, lfsr, cs_lfsr)
