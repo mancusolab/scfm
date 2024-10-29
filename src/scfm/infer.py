@@ -500,7 +500,8 @@ def finemap(
     cs_lfsr = pd.DataFrame(cs["SNPIndex"])
     snp_indices = cs_lfsr["SNPIndex"].to_numpy()
     matched_rows = jnp.array([lfsr[i] for i in snp_indices])
-    column_names = [f"celltype{i}" for i in range(1, 10)]
+    _, k = lfsr.shape
+    column_names = [f"celltype{i}" for i in range(1, k+1)]
     matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
     cs_lfsr = pd.concat([cs_lfsr, matched_rows_df], axis=1)
     
