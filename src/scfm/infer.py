@@ -366,74 +366,17 @@ def make_cs(
 
 
 # Define calculate lsfr
-
-
 @jax.jit
-def cal_pos_prob(post: PosteriorParams) -> Array:
-    # part a
-    # alpha is in the shape (L, p)
-    # extend part_a to be the shape (L, p, 1) for broadcasting
-    part_a = jnp.log(post.prob[:, :, jnp.newaxis])
-
-    # part b
+def _compute_clfsr(post: PosteriorParams) -> Array:
+    # pull marginal posterior SDs
     posterior_std = jnp.sqrt(jnp.diagonal(post.var_b, axis1=-2, axis2=-1))
-    # calculate z-scores
-    z_scores = post.mean_b / posterior_std
-    # calculate positive probabilities
-    part_b = stats.norm.logsf(z_scores)
-    # computing the log of the survival function (complementary CDF)
-    # z_scores is in the shape (L, p, k)
-    # z score for in each effect each SNP on each cell type
-    tmp = part_a + part_b
-    # calculate the min
-    pos_prob = jnp.exp(tmp)
-    # post_prob will be in the shape (L, p, k)
-    return pos_prob
 
-
-@jax.jit
-def cal_neg_prob(post: PosteriorParams) -> Array:
-    # part a
-    # alpha is in the shape (L, p)
-    # extend part_a to be the shape (L, p, 1) for broadcasting
-    part_a = jnp.log(post.prob[:, :, jnp.newaxis])
-
-    # part b
-    posterior_std = jnp.sqrt(jnp.diagonal(post.var_b, axis1=-2, axis2=-1))
-    # calculate z-scores
-    z_scores = post.mean_b / posterior_std
     # calculate negative probabilities
-    part_b = stats.norm.logcdf(z_scores)
-    # z_scores is in the shape (L, p, k)
-    # z score for in each effect each SNP on each cell type
-    tmp = part_a + part_b
-    neg_prob = jnp.exp(tmp)
-    # neg_prob will be in the shape (L, p, k)
-    return neg_prob
+    cdf = stats.norm.cdf(0.0, loc=post.mean_b, scale=posterior_std)
+    sf = stats.norm.sf(0.0, loc=post.mean_b, scale=posterior_std)
 
-
-@jax.jit
-def cal_lfsr(post: PosteriorParams) -> Array:
-    # calculate lfdr (local false discovery rate)
-    lfdr = 1 - post.prob
-    # call pos and neg probs
-    pos_prob = cal_pos_prob(post)
-    neg_prob = cal_neg_prob(post)
-    # extend the dimension for broadcasting
-    zero_prob = lfdr[:, :, jnp.newaxis]
-
-    non_neg_prob = zero_prob + pos_prob
-
-    non_pos_prob = zero_prob + neg_prob
-
-    min_non_neg_prob = jnp.min(non_neg_prob, axis=0)
-    min_non_pos_prob = jnp.min(non_pos_prob, axis=0)
-
-    lfsr = jnp.minimum(min_non_neg_prob, min_non_pos_prob)
-    # lsfr will be in the shape (p, k)
-    # representing the lfsr for each SNP on each cell type
-    return lfsr
-
+    # 1 - max(p, 1 - p) == min(p, 1 - p)
+    return jnp.minimum(sf, cdf)
 
 
 def finemap(
@@ -494,16 +437,17 @@ def finemap(
         seed=12345,
     )
 
-    # Calculate lfsr
-    lfsr = cal_lfsr(post)
+    # Calculate clfsr
+    clfsr = _compute_clfsr(post)
+    min_lfsr = jnp.min(1.0 - post.prob[:, :, jnp.newaxis] * (1.0 - clfsr), axis=0)
+
     # Calculate lfsr for CS
     cs_lfsr = pd.DataFrame(cs["SNPIndex"])
     snp_indices = cs_lfsr["SNPIndex"].to_numpy()
-    matched_rows = jnp.array([lfsr[i] for i in snp_indices])
-    _, k = lfsr.shape
-    column_names = [f"celltype{i}" for i in range(1, k+1)]
+    matched_rows = jnp.array([min_lfsr[i] for i in snp_indices])
+    _, k = min_lfsr.shape
+    column_names = [f"celltype{i}" for i in range(1, k + 1)]
     matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
     cs_lfsr = pd.concat([cs_lfsr, matched_rows_df], axis=1)
-    
 
-    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, lfsr, cs_lfsr)
+    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, min_lfsr, cs_lfsr)
