@@ -42,7 +42,8 @@ class SCFMResult(NamedTuple):
     elbo_increase: A boolean to indicate whether ELBO increases during the optimizations
     l_order: the orginal order that scfm infers
     lfsr: the local false sign rate at each SNP for each cell type
-    cs_lfsr: the local false sign rate at SNP for each cell type in CS
+    snp_lfsr: the local false sign rate at SNP for each cell type in CS
+    cs_lfsr: the local false sign rate for each CS 
     """
 
     prior: PriorParams
@@ -55,6 +56,7 @@ class SCFMResult(NamedTuple):
     elbo_increase: bool
     l_order: Array
     lfsr: Array
+    snp_lfsr: pd.DataFrame
     cs_lfsr: pd.DataFrame
 
 
@@ -415,7 +417,7 @@ def finemap(
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
         print(f"iteration: {train_iter}, prior: {prior}")
         print(f"ELBO[{train_iter}] = {cur_elbo}")
-        print("We are using SCFM Jun 20 Version!")
+        print("We are using SCFM Dec 18 Version!")
         if jnp.fabs(cur_elbo - elbo) < tol:
             print(f"ELBO has converged. ELBO at the last iteration: {cur_elbo}")
             break
@@ -441,13 +443,23 @@ def finemap(
     clfsr = _compute_clfsr(post)
     min_lfsr = jnp.min(1.0 - post.prob[:, :, jnp.newaxis] * (1.0 - clfsr), axis=0)
 
-    # Calculate lfsr for CS
-    cs_lfsr = pd.DataFrame(cs["SNPIndex"])
-    snp_indices = cs_lfsr["SNPIndex"].to_numpy()
+    # Calculate snp_lfsr 
+    snp_lfsr = pd.DataFrame(cs["SNPIndex"])
+    snp_indices = snp_lfsr["SNPIndex"].to_numpy()
     matched_rows = jnp.array([min_lfsr[i] for i in snp_indices])
     _, k = min_lfsr.shape
     column_names = [f"celltype{i}" for i in range(1, k + 1)]
     matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
-    cs_lfsr = pd.concat([cs_lfsr, matched_rows_df], axis=1)
+    snp_lfsr = pd.concat([snp_lfsr, matched_rows_df], axis=1)
+    
+    # Calculate cs_lfsr 
+    cs_lfsr_tmp = pd.merge(cs, snp_lfsr, on="SNPIndex")
+    for celltype in column_names:
+        cs_lfsr_tmp[f"weighted_{celltype}"] = cs_lfsr_tmp["alpha"] * cs_lfsr_tmp[celltype]
+        
+    cs_lfsr = cs_lfsr_tmp.groupby("CSIndex")[[f'weighted_{cell}' for cell in column_names]].sum()
+    cs_lfsr = cs_lfsr.rename(columns=lambda col: col.replace("weighted_", ""))
+    cs_lfsr.reset_index(inplace=True)
+        
 
-    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, min_lfsr, cs_lfsr)
+    return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, min_lfsr, snp_lfsr, cs_lfsr)
