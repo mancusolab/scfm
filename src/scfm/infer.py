@@ -65,35 +65,52 @@ def _update_lth_params(
     R_l: Array, X: Array, post: PosteriorParams, prior: PriorParams, l_index: int
 ) -> tuple[PriorParams, PosteriorParams]:
     """
-    :return:updated prior_resid_var
-    followed Zeyun's style
+    Update the parameters for the l-th effect
+    
+    Args:
+        R_l: Residual matrix
+        X: Design matrix
+        post: Posterior parameters
+        prior: Prior parameters
+        l_index: Index of the effect to update
+        
+    Returns:
+        Updated prior and posterior parameters
     """
     n, k = R_l.shape
     n, p = X.shape
 
-    XtX = jnp.sum(X * X, axis=0)
+    # Precompute sum of squares for each SNP
+    XtX = jnp.sum(X * X, axis=0)  # Shape: (p,)
 
-    # k,k
-    prior_prec = jnpla.inv(prior.var_b[l_index])
-    resid_prec = jnpla.inv(prior.resid_var)
+    # Calculate precisions from covariances
+    prior_prec = jnpla.inv(prior.var_b[l_index])  # Shape: (k,k)
+    resid_prec = jnpla.inv(prior.resid_var)       # Shape: (k,k)
 
-    # p,k,k
-    post_cov = jnpla.inv(resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec)
-    rTXSigInv = (resid_prec @ R_l.T) @ X
-    post_mean = jnp.einsum("pkq,qp->pk", post_cov, rTXSigInv)
+    # Calculate posterior covariance for each SNP
+    post_cov = jnpla.inv(resid_prec * XtX[:, jnp.newaxis, jnp.newaxis] + prior_prec)  # Shape: (p,k,k)
+    
+    # Calculate X^T R Σ^-1 term
+    rTXSigInv = (resid_prec @ R_l.T) @ X  # Shape: (k,p)
+    
+    # Calculate posterior mean for each SNP
+    post_mean = jnp.einsum("pkq,qp->pk", post_cov, rTXSigInv)  # Shape: (p,k)
 
-    # p,
-    alpha = jax.nn.softmax(jnp.log(prior.prob) - stats.multivariate_normal.logpdf(post_mean, jnp.zeros(k), post_cov))
+    # Calculate posterior inclusion probabilities
+    alpha = jax.nn.softmax(
+        jnp.log(prior.prob) - stats.multivariate_normal.logpdf(post_mean, jnp.zeros(k), post_cov)
+    )  # Shape: (p,)
 
-    # Update prior for effect size covariance matrix
-    post_mean_sq = jnp.einsum("pk,pq->pkq", post_mean, post_mean) + post_cov
-    prior_covar_b = jnp.einsum("p,pkq->kq", alpha, post_mean_sq)
+    # Update prior effect size covariance
+    post_mean_sq = jnp.einsum("pk,pq->pkq", post_mean, post_mean) + post_cov  # Shape: (p,k,k)
+    prior_covar_b = jnp.einsum("p,pkq->kq", alpha, post_mean_sq)  # Shape: (k,k)
 
+    # Update prior parameters
     prior = prior._replace(
         var_b=prior.var_b.at[l_index].set(prior_covar_b),
     )
 
-    # update the data structure
+    # Update posterior parameters
     post = PosteriorParams(
         prob=post.prob.at[l_index].set(alpha),
         mean_b=post.mean_b.at[l_index, :, :].set(post_mean),
@@ -105,30 +122,45 @@ def _update_lth_params(
 
 @jax.jit
 def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> PriorParams:
+    """
+    Update the residual covariance matrix based on current posteriors
+    
+    Args:
+        Y: Observed phenotype matrix
+        X: Design matrix
+        post: Posterior parameters
+        prior: Prior parameters
+        
+    Returns:
+        Updated prior parameters with new residual variance
+    """
     n, p = X.shape
 
-    # Compute some statistics
-    # We evaluated E_Q(B) to be a k by k matrix denoted B
-    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
+    # Calculate expected effect sizes across all L effects
+    # E_Q(B) = sum_l alpha_l * mu_l
+    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)  # Shape: (p,k)
 
-    # Evaluate E_Q[B^T * X^T * X * B]
-    # Evaluate E_Q[B^T B]
-    pred = X @ B
+    # Calculate predicted values
+    pred = X @ B  # Shape: (n,k)
+    
+    # Calculate second moment of effects
+    # E_Q[B^T B] includes both mean and variance components
     M = jnp.einsum("lpk,lpq,lp->pkq", post.mean_b, post.mean_b, post.prob) + jnp.einsum(
         "lp,lpkq->pkq", post.prob, post.var_b
-    )
-    outer_moment = jnp.einsum("nj,nj,jkq->kq", X, X, M) + pred.T @ pred
+    )  # Shape: (p,k,k)
+    
+    # Calculate X^T X weighted by second moment
+    outer_moment = jnp.einsum("nj,nj,jkq->kq", X, X, M) + pred.T @ pred  # Shape: (k,k)
 
-    # Update prior residual variance
-    # term1 = jnp.sum(Y * Y)  # tr(Y^T*Y)
-    term1 = Y.T @ Y
-    # term2 = -2 * jnp.sum(Y * pred)  # -2tr(Y^T*X*E_Q(B))
-    term2 = -2 * Y.T @ pred
-    # term3 = jnp.trace(outer_moment)  # tr(E_Q[B^T*X^T*X*B])
-    term3 = outer_moment
+    # Compute terms for residual variance update
+    term1 = Y.T @ Y                 # Y^T Y
+    term2 = -2 * Y.T @ pred         # -2Y^T X E[B]
+    term3 = outer_moment            # E[B^T X^T X B]
 
+    # Updated residual variance
     resid_var = (term1 + term2 + term3) / n
 
+    # Create updated prior
     prior = prior._replace(
         resid_var=resid_var,
     )
@@ -138,28 +170,46 @@ def _update_resid_covar(Y: Array, X: Array, post: PosteriorParams, prior: PriorP
 
 @jax.jit
 def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> float:
-    # Evaluate data log likelihood
+    """
+    Calculate the expected log-likelihood given current parameters
+    
+    Args:
+        Y: Observed phenotype matrix
+        X: Design matrix
+        post: Posterior parameters
+        prior: Prior parameters
+        
+    Returns:
+        Expected log-likelihood value
+    """
     n, p = X.shape
     L, p, k = post.mean_b.shape
 
-    # We evaluated E_Q(B) to be a k by k matrix denoted B
-    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)
+    # Calculate expected effect sizes: E_Q(B)
+    B = jnp.einsum("lp,lpk->pk", post.prob, post.mean_b)  # Shape: (p,k)
 
-    # Evaluate E_Q[B^T * X^T * X * B]
-    # Evaluate E_Q[B^T B]
-    pred = X @ B
-    M = jnp.einsum("lpk, lpq->lpkq", post.mean_b, post.mean_b) + post.var_b
-    outer_moment = jnp.einsum("nj, nj, lj, ljkq->kq", X, X, post.prob, M) + pred.T @ pred
-    inv_prec_Yt = jspla.solve(prior.resid_var, Y.T, assume_a="pos")
-    inv_prec_outer_moment = jspla.solve(prior.resid_var, outer_moment, assume_a="pos")
+    # Calculate predictions
+    pred = X @ B  # Shape: (n,k)
+    
+    # Calculate second moments including both means and variances
+    M = jnp.einsum("lpk,lpq->lpkq", post.mean_b, post.mean_b) + post.var_b  # Shape: (L,p,k,k)
+    
+    # Calculate outer moment term
+    outer_moment = jnp.einsum("nj,nj,lj,ljkq->kq", X, X, post.prob, M) + pred.T @ pred  # Shape: (k,k)
+    
+    # Solve linear systems with residual precision matrix
+    inv_prec_Yt = jspla.solve(prior.resid_var, Y.T, assume_a="pos")  # Shape: (k,n)
+    inv_prec_outer_moment = jspla.solve(prior.resid_var, outer_moment, assume_a="pos")  # Shape: (k,k)
+    
+    # Calculate log-likelihood
     ll = -0.5 * (
         (
-            jnp.sum(inv_prec_Yt * Y.T)  # tr(inv(Sigma) Y'Y)
-            - 2 * jnp.sum(inv_prec_Yt * pred.T)  # tr(inv(Sigma) Y'X E[B])
-            + jnp.trace(inv_prec_outer_moment)  # tr(inv(Sigma) E[B'X'XB])
+            jnp.sum(inv_prec_Yt * Y.T)               # tr(Σ⁻¹ Y'Y)
+            - 2 * jnp.sum(inv_prec_Yt * pred.T)      # -2tr(Σ⁻¹ Y'X E[B])
+            + jnp.trace(inv_prec_outer_moment)       # tr(Σ⁻¹ E[B'X'XB])
         )
-        + k * jnp.log(2 * jnp.pi)
-        + n * jnpla.slogdet(prior.resid_var)[1]
+        + k * jnp.log(2 * jnp.pi)                   # Constant term from multivariate normal
+        + n * jnpla.slogdet(prior.resid_var)[1]     # Log determinant term
     )
 
     return ll
@@ -167,11 +217,25 @@ def expected_loglikelihood(Y: Array, X: Array, post: PosteriorParams, prior: Pri
 
 @jax.jit
 def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams) -> Array:
-    # compute log likelihood and kl distance
+    """
+    Compute Evidence Lower Bound (ELBO) for variational inference
+    
+    Args:
+        Y: Observed phenotype matrix
+        X: Design matrix
+        post: Posterior parameters
+        prior: Prior parameters
+        
+    Returns:
+        Current ELBO value
+    """
+    # Compute expected log-likelihood
     ll = expected_loglikelihood(Y, X, post, prior)
+    
+    # Compute KL divergence between posterior and prior
     kl = kl_single_effect(prior, post)
 
-    # Given the current loglikelihood and kl distance, evaluate the current ELBO
+    # ELBO = Expected log-likelihood - KL divergence
     cur_elbo = ll - kl
 
     return cur_elbo
@@ -181,19 +245,16 @@ def _compute_elbo(Y: Array, X: Array, post: PosteriorParams, prior: PriorParams)
 def _fit_lth_effect(l_index: int, params: _LResult) -> _LResult:
     resid, X, Y, post, prior = params
 
-    # TODO: do the CAVI updates for the lth effect
+    # Add back the contribution of the l-th effect to get the current residual
     resid_l = resid + X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
-    # update prior
+    # Update prior parameters for the l-th effect
     prior, _ = _update_lth_params(resid_l, X, post, prior, l_index)
 
-    # update posterior parameters for lth effect and jth SNP
+    # Update posterior parameters for the l-th effect using the updated prior
     _, post = _update_lth_params(resid_l, X, post, prior, l_index)
 
-    # update prior
-    # prior = _update_prior_covar(Y, X, post, prior, l_index)
-
-    # update residual for next \ell effect
+    # Update residual for next effect by subtracting the contribution of the current effect
     resid = resid_l - X @ (post.mean_b[l_index, :, :] * post.prob[l_index, :, jnp.newaxis])
 
     return _LResult(resid, X, Y, post, prior)
@@ -210,6 +271,7 @@ def _fit_model(
 
     init_params = _LResult(resid, X, Y, post, prior)
 
+    # Apply each effect update
     _, _, _, post, prior = lax.fori_loop(0, L, _fit_lth_effect, init_params)
 
     # update prior (i.e. resid_var)
@@ -263,107 +325,121 @@ def make_cs(
     seed: int = 12345,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Array, Array]:
     """
+    Create credible sets from posterior probabilities
+    
     Args:
-
         alpha: L by p matrix contains posterior probability for SNP to be causal
         X: genotype matrix
-        N: sample size
+        threshold: probability threshold for credible set inclusion (default 0.9)
         purity: the minimum pairwise correlation across SNPs to be eligible as output credible set
         max_select: the maximum number of selected SNP to compute purity
+        seed: random seed for reproducibility
 
     Returns:
-        :py:obj:`Tuple[pd.DataFrame, pd.DataFrame]`: A tuple of
-            #. credible set (:py:obj:`pd.DataFrame`) after pruning for purity,
-            #. full credible set (:py:obj:`pd.DataFrame`) before pruning for purity.
-            #. PIPs (:py:obj:`Array`) across :math:`L` credible sets.
-            #. PIPs (:py:obj:`Array`) across credible sets that are not pruned. An array of zero if all credible sets
-                are pruned.
-
+        :py:obj:`Tuple[pd.DataFrame, pd.DataFrame, Array, Array]`: A tuple of
+            1. credible set (:py:obj:`pd.DataFrame`) after pruning for purity
+            2. full credible set (:py:obj:`pd.DataFrame`) before pruning for purity
+            3. PIPs (:py:obj:`Array`) across all L credible sets
+            4. PIPs (:py:obj:`Array`) across credible sets that are not pruned
     """
+    # Initialize random key
     rng_key = rdm.PRNGKey(seed)
     L, p = alpha.shape
     N, _ = X.shape
-    t_alpha = pd.DataFrame(alpha.T).reset_index()
-
-    cs = pd.DataFrame(columns=["CSIndex", "SNPIndex", "alpha", "c_alpha"])
-    full_alphas = t_alpha[["index"]]
-
+    
+    # Convert alpha to a dataframe for easier processing
+    alpha_np = jnp.asarray(alpha).T  # Make sure it's a JAX array and transpose
+    t_alpha = pd.DataFrame(alpha_np)
+    t_alpha['index'] = jnp.arange(p)
+    
+    # Initialize output dataframes
+    cs_list = []
+    full_alphas = pd.DataFrame({'SNPIndex': jnp.arange(p)})
+    
+    # Pre-calculate PIPs to avoid redundant computation
+    pip_all = make_pip(alpha)
+    
+    # Process each credible set
     for ldx in range(L):
-        tmp_pd = t_alpha[["index", ldx]].sort_values(ldx, ascending=False).reset_index(drop=True)
-        tmp_pd["csum"] = tmp_pd[[ldx]].cumsum()
-        n_row = tmp_pd[tmp_pd.csum < threshold].shape[0]
-
-        if n_row == tmp_pd.shape[0]:
-            select_idx = jnp.arange(n_row)
-        else:
-            select_idx = jnp.arange(n_row + 1)
-
-        # output CS index is 1-based
-        tmp_cs = (
-            tmp_pd.iloc[select_idx, :]
-            .assign(CSIndex=(ldx + 1))
-            .rename(columns={"csum": "c_alpha", "index": "SNPIndex", ldx: "alpha"})
-        )
-
-        tmp_pd["in_cs"] = (tmp_pd.index.values <= jnp.max(select_idx)) * 1
-
-        # prepare alphas table's entries
-        tmp_pd = tmp_pd.drop(["csum"], axis=1).rename(
-            columns={
-                "in_cs": f"in_cs_l{ldx + 1}",
-                ldx: f"alpha_l{ldx + 1}",
-            }
-        )
-
-        full_alphas = full_alphas.merge(tmp_pd, how="left", on="index")
-
-        # check the purity
-        snp_idx = tmp_cs.SNPIndex.values.astype("int64")
-
-        # randomly select 'max_select' SNPs
+        # Sort SNPs by their alpha values for this effect
+        tmp_df = pd.DataFrame({
+            'SNPIndex': jnp.arange(p),
+            'alpha': alpha_np[:, ldx],
+        }).sort_values('alpha', ascending=False).reset_index(drop=True)
+        
+        # Calculate cumulative sum and find threshold crossing
+        tmp_df['c_alpha'] = tmp_df['alpha'].cumsum()
+        n_row = tmp_df[tmp_df['c_alpha'] < threshold].shape[0]
+        
+        # Handle edge case where all SNPs are needed
+        last_idx = n_row if n_row == tmp_df.shape[0] else n_row + 1
+        
+        # Create CS for this effect (1-based index)
+        tmp_cs = tmp_df.iloc[:last_idx].copy()
+        tmp_cs['CSIndex'] = ldx + 1
+        
+        # Update tracking for full alphas dataframe
+        in_cs = pd.Series(0, index=range(p))
+        in_cs.iloc[tmp_df.iloc[:last_idx]['SNPIndex'].values] = 1
+        full_alphas[f"in_cs_l{ldx + 1}"] = in_cs.values
+        full_alphas[f"alpha_l{ldx + 1}"] = alpha_np[:, ldx]
+        
+        # For purity calculation, convert to integer indices
+        snp_idx = tmp_cs['SNPIndex'].values.astype("int64")
+        
+        # Check if we need to subsample SNPs for purity calculation
         if len(snp_idx) > max_select:
-            snp_idx = rdm.choice(rng_key, snp_idx, shape=(max_select,), replace=False)
-
-        # update genotype data and LD
-        ld_X = X[:, snp_idx]
-        ld = jnp.einsum("jk, jm->km", ld_X, ld_X) / N
-
-        avg_corr = jnp.sum(jnp.min(jnp.abs(ld), axis=(0, 1)))
-
+            rng_key, subkey = rdm.split(rng_key)
+            snp_idx = rdm.choice(subkey, snp_idx, shape=(max_select,), replace=False)
+        
+        # Calculate linkage disequilibrium and purity
+        if len(snp_idx) > 1:  # Only calculate purity if we have multiple SNPs
+            ld_X = X[:, snp_idx]
+            # Optimize LD calculation for efficiency
+            ld = jnp.einsum("jk,jm->km", ld_X, ld_X) / N
+            # Minimum absolute correlation as purity measure
+            avg_corr = jnp.min(jnp.abs(ld - jnp.eye(ld.shape[0])) + jnp.eye(ld.shape[0]))
+        else:
+            # If only one SNP, purity is perfect
+            avg_corr = 1.0
+            
         full_alphas[f"purity_l{ldx + 1}"] = avg_corr
-
+        
+        # Add to CS if purity threshold is met
         if avg_corr > purity:
-            cs = pd.concat([cs, tmp_cs], ignore_index=True)
+            cs_list.append(tmp_cs)
             full_alphas[f"kept_l{ldx + 1}"] = 1
         else:
             full_alphas[f"kept_l{ldx + 1}"] = 0
-
-    pip_all = make_pip(alpha)
-
-    # CSIndex is now 1-based
-    pip_cs = make_pip(alpha[(cs.CSIndex.unique().astype(int) - 1),])
-
-    n_snp_cs = cs.SNPIndex.values.astype(int)
-    n_snp_cs_unique = jnp.unique(cs.SNPIndex.values.astype(int))
-
-    if len(n_snp_cs) != len(n_snp_cs_unique):
-        log.logger.warning(
-            "Same SNPs appear in different credible set, which is very unusual."
-            + " You may want to check this gene in details."
-        )
-
-    cs["pip_all"] = jnp.array([pip_all[idx] for idx in cs.SNPIndex.values.astype(int)])
-    cs["pip_cs"] = jnp.array([pip_cs[idx] for idx in cs.SNPIndex.values.astype(int)])
-
+    
+    # Combine all credible sets
+    if cs_list:
+        cs = pd.concat(cs_list, ignore_index=True)
+        # Calculate PIP for credible sets that passed purity
+        cs_indices = jnp.array(cs['CSIndex'].unique().astype(int) - 1)
+        pip_cs = make_pip(alpha[cs_indices]) if len(cs_indices) > 0 else jnp.zeros_like(pip_all)
+        
+        # Add PIPs to credible sets
+        cs['pip_all'] = cs['SNPIndex'].map(lambda idx: pip_all[idx])
+        cs['pip_cs'] = cs['SNPIndex'].map(lambda idx: pip_cs[idx])
+        
+        # Check for duplicated SNPs across credible sets
+        n_snp_cs = cs.SNPIndex.values.astype(int)
+        n_snp_cs_unique = jnp.unique(n_snp_cs)
+        if len(n_snp_cs) != len(n_snp_cs_unique):
+            log.logger.warning(
+                "Same SNPs appear in different credible set, which is very unusual."
+                + " You may want to check this gene in details."
+            )
+    else:
+        # Create empty dataframe with correct columns if no CS passed purity
+        cs = pd.DataFrame(columns=["CSIndex", "SNPIndex", "alpha", "c_alpha", "pip_all", "pip_cs"])
+        pip_cs = jnp.zeros_like(pip_all)
+    
+    # Add PIPs to full alphas dataframe
     full_alphas["pip_all"] = pip_all
     full_alphas["pip_cs"] = pip_cs
-    full_alphas = full_alphas.rename(columns={"index": "SNPIndex"})
-
-    # log.logger.info(
-    # f"{len(cs.CSIndex.unique())} out of {L} credible sets remain after pruning based on purity ({purity})."
-    # + " For detailed results, specify --alphas."
-    # )
-
+    
     return cs, full_alphas, pip_all, pip_cs
 
 
@@ -381,6 +457,13 @@ def _compute_clfsr(post: PosteriorParams) -> Array:
     return jnp.minimum(sf, cdf)
 
 
+# Function to check if precompilation has been done
+def _check_precompilation():
+    import os
+    flag_file = os.path.expanduser("~/.scfm/precompiled")
+    return os.path.exists(flag_file)
+
+
 def finemap(
     Y: ArrayLike,
     X: ArrayLike,
@@ -389,15 +472,45 @@ def finemap(
     tol: float = 1e-3,
     max_iter: int = 100,
     no_reorder: bool = False,
+    precompile: bool = True,
+    prior_covar_filter: float = None,
 ):
-    # todo: QC the input data; check dimensions match, etc.
-    # check dimensions match
+    """
+    Perform fine-mapping inference using SCFM
+    
+    Args:
+        Y: Phenotype matrix of shape (n_samples, n_traits)
+        X: Genotype matrix of shape (n_samples, n_snps)
+        L: Number of causal effects to model
+        prior_var: Initial prior variance for effect sizes
+        tol: Convergence tolerance for ELBO
+        max_iter: Maximum number of iterations
+        no_reorder: If True, skip reordering of effects by magnitude
+        precompile: If True (default), perform precompilation when needed to improve performance
+                    Set to False to skip precompilation (useful for batch jobs)
+        prior_covar_filter: If provided, filter effects where log(trace_norm_l1) - log(trace_norm_lj) > threshold
+        
+    Returns:
+        SCFMResult containing posterior estimates and credible sets
+    """
+    # Handle precompilation (turned on by default)
+    if precompile:
+        if not _check_precompilation():
+            try:
+                print("First-time run: performing precompilation to speed up this and future runs...")
+                from .precompile import precompile_scfm
+                precompile_scfm()
+            except Exception as e:
+                print(f"Warning: Precompilation failed: {e}")
+                print("Continuing without precompilation. Future performance may be slower.")
+    
+    # Check dimensions match
     n_y, k = Y.shape
     n_x, p = X.shape
     if n_y != n_x:
         raise ValueError("Number of individuals do not match: " f"Y is {n_y}x{k}, but X is {n_x}x{p}")
 
-    # initialize model parameters
+    # Initialize model parameters
     prior = PriorParams(
         resid_var=jnp.eye(k),
         prob=jnp.ones(p) / p,
@@ -410,26 +523,77 @@ def finemap(
         prob=jnp.tile(prior.prob, (L, 1)),
     )
 
-    # evaluate current elbo
+    # Set up for ELBO tracking and convergence
     elbo = -jnp.inf
     elbo_increase = True
+    
+    # Profiling timers
+    import time
+    total_iter_time = 0
+    
+    # Main inference loop
     for train_iter in range(max_iter):
+        iter_start = time.time()
+        
+        # Update model parameters
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
-        print(f"iteration: {train_iter}, prior: {prior}")
+        
+        # Track timing
+        iter_end = time.time()
+        iter_time = iter_end - iter_start
+        total_iter_time += iter_time
+        
+        # Report progress
+        print(f"iteration: {train_iter}, time: {iter_time:.4f}s, prior: {prior}")
         print(f"ELBO[{train_iter}] = {cur_elbo}")
-        print("We are using SCFM Dec 18 Version!")
+        
+        # Check for convergence
         if jnp.fabs(cur_elbo - elbo) < tol:
             print(f"ELBO has converged. ELBO at the last iteration: {cur_elbo}")
             break
 
-        # Update the last ELBO to the current ELBO at the end of the iteration
+        # Update for next iteration
         elbo = cur_elbo
 
+    # Report timing summary
+    print(f"Total iteration time: {total_iter_time:.4f}s, Average: {total_iter_time/(train_iter+1):.4f}s per iteration")
+    
+    # Reorder effects by magnitude
+    reorder_start = time.time()
     l_order = jnp.arange(L)
     if not no_reorder:
         prior, post, l_order = _reorder_l(prior, post)
+    reorder_time = time.time() - reorder_start
+    print(f"Reordering time: {reorder_time:.4f}s")
 
-    # Fine-mapping
+    # Apply prior covariance filtering if threshold is provided
+    if prior_covar_filter is not None:
+        # Compute trace norms for all effects
+        trace_norms = jnp.array([jnp.trace(prior.var_b[l]) for l in range(L)])
+        log_trace_norms = jnp.log(trace_norms)
+        
+        # Calculate differences from the first effect
+        log_trace_diff = log_trace_norms[0] - log_trace_norms
+        
+        # Find effects that pass the threshold
+        valid_effects = jnp.where(log_trace_diff <= prior_covar_filter)[0]
+        
+        print(f"Prior covariance filtering: keeping {len(valid_effects)} out of {L} effects")
+        print(f"Log trace norm differences: {log_trace_diff}")
+        
+        # Filter prior and posterior parameters
+        prior = prior._replace(var_b=prior.var_b[valid_effects])
+        post = post._replace(
+            prob=post.prob[valid_effects],
+            mean_b=post.mean_b[valid_effects],
+            var_b=post.var_b[valid_effects]
+        )
+        
+        # Update l_order to reflect filtering
+        l_order = l_order[valid_effects]
+    
+    # Create credible sets
+    cs_start = time.time()
     cs, full_alphas, pip_all, pip_cs = make_cs(
         post.prob,
         X,
@@ -438,28 +602,44 @@ def finemap(
         max_select=500,
         seed=12345,
     )
+    cs_time = time.time() - cs_start
+    print(f"Credible set computation time: {cs_time:.4f}s")
 
-    # Calculate clfsr
+    # Calculate LFSR (local false sign rate)
+    lfsr_start = time.time()
+    
+    # Compute LFSR for all SNPs and traits
     clfsr = _compute_clfsr(post)
     min_lfsr = jnp.min(1.0 - post.prob[:, :, jnp.newaxis] * (1.0 - clfsr), axis=0)
 
-    # Calculate snp_lfsr 
-    snp_lfsr = pd.DataFrame(cs["SNPIndex"])
-    snp_indices = snp_lfsr["SNPIndex"].to_numpy()
-    matched_rows = jnp.array([min_lfsr[i] for i in snp_indices])
-    _, k = min_lfsr.shape
-    column_names = [f"celltype{i}" for i in range(1, k + 1)]
-    matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
-    snp_lfsr = pd.concat([snp_lfsr, matched_rows_df], axis=1)
+    # Create SNP-level LFSR results
+    if not cs.empty:
+        # Process LFSR for SNPs in credible sets
+        snp_lfsr = pd.DataFrame({"SNPIndex": cs["SNPIndex"].unique()})
+        snp_indices = snp_lfsr["SNPIndex"].to_numpy()
+        matched_rows = jnp.array([min_lfsr[i] for i in snp_indices])
+        column_names = [f"celltype{i}" for i in range(1, k + 1)]
+        matched_rows_df = pd.DataFrame(matched_rows, columns=column_names)
+        snp_lfsr = pd.concat([snp_lfsr, matched_rows_df], axis=1)
+        
+        # Compute credible set level LFSR
+        cs_lfsr_tmp = pd.merge(cs, snp_lfsr, on="SNPIndex")
+        weighted_cols = []
+        for celltype in column_names:
+            cs_lfsr_tmp[f"weighted_{celltype}"] = cs_lfsr_tmp["alpha"] * cs_lfsr_tmp[celltype]
+            weighted_cols.append(f"weighted_{celltype}")
+            
+        # Group by credible set
+        cs_lfsr = cs_lfsr_tmp.groupby("CSIndex")[weighted_cols].sum()
+        cs_lfsr = cs_lfsr.rename(columns=lambda col: col.replace("weighted_", ""))
+        cs_lfsr.reset_index(inplace=True)
+    else:
+        # Handle case with no credible sets
+        snp_lfsr = pd.DataFrame(columns=["SNPIndex"] + [f"celltype{i}" for i in range(1, k + 1)])
+        cs_lfsr = pd.DataFrame(columns=["CSIndex"] + [f"celltype{i}" for i in range(1, k + 1)])
     
-    # Calculate cs_lfsr 
-    cs_lfsr_tmp = pd.merge(cs, snp_lfsr, on="SNPIndex")
-    for celltype in column_names:
-        cs_lfsr_tmp[f"weighted_{celltype}"] = cs_lfsr_tmp["alpha"] * cs_lfsr_tmp[celltype]
-        
-    cs_lfsr = cs_lfsr_tmp.groupby("CSIndex")[[f'weighted_{cell}' for cell in column_names]].sum()
-    cs_lfsr = cs_lfsr.rename(columns=lambda col: col.replace("weighted_", ""))
-    cs_lfsr.reset_index(inplace=True)
-        
-
+    lfsr_time = time.time() - lfsr_start
+    print(f"LFSR computation time: {lfsr_time:.4f}s")
+    
+    # Return final results    
     return SCFMResult(prior, post, pip_all, pip_cs, cs, full_alphas, elbo, elbo_increase, l_order, min_lfsr, snp_lfsr, cs_lfsr)
