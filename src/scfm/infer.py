@@ -473,7 +473,7 @@ def finemap(
     max_iter: int = 100,
     no_reorder: bool = False,
     precompile: bool = True,
-    prior_covar_filter: float = None,
+    prior_covar_filter: float = 2,
 ):
     """
     Perform fine-mapping inference using SCFM
