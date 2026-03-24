@@ -568,9 +568,16 @@ def finemap(
 
     # Apply prior covariance filtering if threshold is provided
     if prior_covar_filter is not None:
-        # Compute trace norms for all effects
-        trace_norms = jnp.array([jnp.trace(prior.var_b[l]) for l in range(L)])
-        log_trace_norms = jnp.log(trace_norms)
+        # Handle both multivariate (scFM) and univariate (SuSiE) cases
+        # prior.var_b is (L, k, k) for both cases
+        if k == 1:
+            # Univariate case (SuSiE): var_b is (L, 1, 1), extract scalars
+            trace_norms = jnp.array([prior.var_b[l, 0, 0] for l in range(L)])
+        else:
+            # Multivariate case (scFM): var_b is (L, k, k), use trace
+            trace_norms = jnp.array([jnp.trace(prior.var_b[l]) for l in range(L)])
+        
+        log_trace_norms = jnp.log10(trace_norms)
         
         # Calculate differences from the first effect
         log_trace_diff = log_trace_norms[0] - log_trace_norms
@@ -578,8 +585,10 @@ def finemap(
         # Find effects that pass the threshold
         valid_effects = jnp.where(log_trace_diff <= prior_covar_filter)[0]
         
-        print(f"Prior covariance filtering: keeping {len(valid_effects)} out of {L} effects")
+        mode_str = "univariate (SuSiE)" if k == 1 else "multivariate (scFM)"
+        print(f"Prior covariance filtering ({mode_str}): keeping {len(valid_effects)} out of {L} effects")
         print(f"Log trace norm differences: {log_trace_diff}")
+        print(f"Threshold: var_lj < 1/{int(10**prior_covar_filter)} var_l1")
         
         # Filter prior and posterior parameters
         prior = prior._replace(var_b=prior.var_b[valid_effects])
