@@ -316,6 +316,40 @@ def make_pip(alpha: ArrayLike) -> Array:
     return pip
 
 
+def compute_marginal_pvalues(X: ArrayLike, Y: ArrayLike) -> Array:
+    """Per-SNP, per-cell-type marginal association p-values via Z-scores.
+
+    Computes Pearson correlation between each SNP and each trait, converts
+    to a t-statistic, and returns two-sided p-values.
+
+    Args:
+        X: (N, p) genotype matrix.
+        Y: (N, k) phenotype matrix.
+
+    Returns:
+        (p, k) matrix of two-sided p-values.
+    """
+    import numpy as np
+    from scipy import stats as sp_stats
+
+    X_np = np.asarray(X)
+    Y_np = np.asarray(Y)
+    N = X_np.shape[0]
+
+    X_centered = X_np - X_np.mean(axis=0, keepdims=True)
+    Y_centered = Y_np - Y_np.mean(axis=0, keepdims=True)
+
+    eps = 1e-30
+    X_std = X_centered / (np.sqrt(np.sum(X_centered**2, axis=0, keepdims=True)) + eps)
+    Y_std = Y_centered / (np.sqrt(np.sum(Y_centered**2, axis=0, keepdims=True)) + eps)
+
+    corr = X_std.T @ Y_std  # (p, k)
+    t_stat = corr * np.sqrt((N - 2) / (1 - corr**2 + eps))
+    pvals = 2 * sp_stats.t.sf(np.abs(t_stat), df=N - 2)  # (p, k)
+
+    return jnp.array(pvals)
+
+
 def make_cs(
     alpha: ArrayLike,
     X: ArrayLike,
@@ -464,6 +498,25 @@ def _check_precompilation():
     return os.path.exists(flag_file)
 
 
+@partial(jax.jit, static_argnums=(2,))
+def _per_effect_log_marginal(post: PosteriorParams, prior: PriorParams, l_index: int) -> Array:
+    """
+    Per-effect log marginal under uniform SNP prior, mirroring mvSuSiE's
+    `BayesianMultivariateRegression$loglik` + `multivariate_lbf`:
+      lbf[j] = logN(bhat[j]; 0, S[j] + U) - logN(bhat[j]; 0, S[j])
+      logmarg = log_sum_exp(lbf - log p)        # uniform prior_weights = 1/p
+    Equals loglik(U) - loglik(U=0) since loglik(U=0) = 0 under this normalization.
+    """
+    bhat = post.mean_b[l_index]                 # (p, k)
+    S = post.var_b[l_index]                     # (p, k, k)
+    U = prior.var_b[l_index]                    # (k, k)
+    p, k = bhat.shape
+    zero = jnp.zeros(k)
+    lbf = (stats.multivariate_normal.logpdf(bhat, zero, S + U)
+         - stats.multivariate_normal.logpdf(bhat, zero, S))
+    return jax.scipy.special.logsumexp(lbf - jnp.log(p))
+
+
 def finemap(
     Y: ArrayLike,
     X: ArrayLike,
@@ -474,10 +527,13 @@ def finemap(
     no_reorder: bool = False,
     precompile: bool = True,
     prior_covar_filter: float = 2,
+    prior_covar_filter_mode: str = "trace",
+    check_null_threshold: float = 0,
+    check_null_method: str = "per_effect_lbf",
 ):
     """
     Perform fine-mapping inference using SCFM
-    
+
     Args:
         Y: Phenotype matrix of shape (n_samples, n_traits)
         X: Genotype matrix of shape (n_samples, n_snps)
@@ -488,8 +544,26 @@ def finemap(
         no_reorder: If True, skip reordering of effects by magnitude
         precompile: If True (default), perform precompilation when needed to improve performance
                     Set to False to skip precompilation (useful for batch jobs)
-        prior_covar_filter: If provided, filter effects where log(trace_norm_l1) - log(trace_norm_lj) > threshold
-        
+        prior_covar_filter: If provided, filter effects where log(norm_l1) - log(norm_lj) > threshold
+        prior_covar_filter_mode: "trace" uses trace(prior.var_b[l]) (default, backward compatible);
+                                 "max_diag" uses max(diag(prior.var_b[l])) to avoid penalizing
+                                 cell-type-specific effects
+        check_null_threshold: Per-effect null-comparison threshold applied after each outer
+                              iteration; if the null-comparison log-quantity is < threshold,
+                              the effect is zeroed (V_l = epsilon*I and post zeroed) so it
+                              stays suppressed in subsequent iterations. Default 0 enables the
+                              filter at the canonical mvSuSiE setting (kill if log-BF <= 0).
+                              Pass None to disable.
+        check_null_method: How to compute the null-comparison quantity.
+                           "per_effect_lbf" (default) — apples-to-apples with mvSuSiE's
+                              `BayesianMultivariateRegression$loglik`: per-SNP multivariate
+                              log Bayes factor, softmax-aggregated under uniform prior weights.
+                              Equals `loglik(U) - loglik(U=0)`. With threshold=0 this matches
+                              mvSuSiE's default (kill effect if its log-BF <= 0).
+                           "elbo_delta" (legacy patch) — full-model expected log-likelihood
+                              with effect l vs without; threshold lives on the full-data scale,
+                              not the per-effect SER scale.
+
     Returns:
         SCFMResult containing posterior estimates and credible sets
     """
@@ -534,19 +608,61 @@ def finemap(
     # Main inference loop
     for train_iter in range(max_iter):
         iter_start = time.time()
-        
+
         # Update model parameters
         cur_elbo, post, prior = _fit_model(Y, X, post, prior)
-        
+
+        # mvSuSiE-style per-effect null check applied during fitting.
+        # Guarded: no-op when check_null_threshold is None (preserves default behavior).
+        if check_null_threshold is not None:
+            eps_kk = jnp.eye(k) * 1e-20
+            eps_pkk = jnp.tile(eps_kk, (p, 1, 1))
+            uniform_p = jnp.ones(p) / p
+            zero_pk = jnp.zeros((p, k))
+            for l in range(L):
+                # Skip effects already zeroed in a prior iteration (max_diag ~ eps).
+                if float(jnp.max(jnp.diag(prior.var_b[l]))) < 1e-15:
+                    continue
+
+                if check_null_method == "per_effect_lbf":
+                    log_marg = float(_per_effect_log_marginal(post, prior, l))
+                    keep = log_marg >= check_null_threshold
+                    diag_msg = f"logBF={log_marg:.4f}"
+                elif check_null_method == "elbo_delta":
+                    logL_full = float(expected_loglikelihood(Y, X, post, prior))
+                    prior_probe = prior._replace(var_b=prior.var_b.at[l].set(eps_kk))
+                    post_probe = post._replace(
+                        prob=post.prob.at[l].set(uniform_p),
+                        mean_b=post.mean_b.at[l].set(zero_pk),
+                        var_b=post.var_b.at[l].set(eps_pkk),
+                    )
+                    logL_null = float(expected_loglikelihood(Y, X, post_probe, prior_probe))
+                    delta = logL_full - logL_null
+                    keep = delta >= check_null_threshold
+                    diag_msg = f"Δlogl={delta:.4f}"
+                else:
+                    raise ValueError(
+                        f"check_null_method must be 'per_effect_lbf' or 'elbo_delta', got {check_null_method}"
+                    )
+
+                if not keep:
+                    prior = prior._replace(var_b=prior.var_b.at[l].set(eps_kk))
+                    post = post._replace(
+                        prob=post.prob.at[l].set(uniform_p),
+                        mean_b=post.mean_b.at[l].set(zero_pk),
+                        var_b=post.var_b.at[l].set(eps_pkk),
+                    )
+                    print(f"  [null-check/{check_null_method}] iter={train_iter} effect={l} killed ({diag_msg} < {check_null_threshold})")
+
         # Track timing
         iter_end = time.time()
         iter_time = iter_end - iter_start
         total_iter_time += iter_time
-        
+
         # Report progress
         print(f"iteration: {train_iter}, time: {iter_time:.4f}s, prior: {prior}")
         print(f"ELBO[{train_iter}] = {cur_elbo}")
-        
+
         # Check for convergence
         if jnp.fabs(cur_elbo - elbo) < tol:
             print(f"ELBO has converged. ELBO at the last iteration: {cur_elbo}")
@@ -572,23 +688,27 @@ def finemap(
         # prior.var_b is (L, k, k) for both cases
         if k == 1:
             # Univariate case (SuSiE): var_b is (L, 1, 1), extract scalars
-            trace_norms = jnp.array([prior.var_b[l, 0, 0] for l in range(L)])
+            norms = jnp.array([prior.var_b[l, 0, 0] for l in range(L)])
+        elif prior_covar_filter_mode == "max_diag":
+            # Max-diagonal mode: use max(diag(prior.var_b[l]))
+            # Avoids penalizing cell-type-specific effects
+            norms = jnp.array([jnp.max(jnp.diag(prior.var_b[l])) for l in range(L)])
         else:
-            # Multivariate case (scFM): var_b is (L, k, k), use trace
-            trace_norms = jnp.array([jnp.trace(prior.var_b[l]) for l in range(L)])
-        
-        log_trace_norms = jnp.log10(trace_norms)
-        
+            # Default trace mode: use trace(prior.var_b[l])
+            norms = jnp.array([jnp.trace(prior.var_b[l]) for l in range(L)])
+
+        log_norms = jnp.log10(norms)
+
         # Calculate differences from the first effect
-        log_trace_diff = log_trace_norms[0] - log_trace_norms
-        
+        log_norm_diff = log_norms[0] - log_norms
+
         # Find effects that pass the threshold
-        valid_effects = jnp.where(log_trace_diff <= prior_covar_filter)[0]
-        
-        mode_str = "univariate (SuSiE)" if k == 1 else "multivariate (scFM)"
+        valid_effects = jnp.where(log_norm_diff <= prior_covar_filter)[0]
+
+        mode_str = "univariate (SuSiE)" if k == 1 else f"multivariate (scFM, {prior_covar_filter_mode})"
         print(f"Prior covariance filtering ({mode_str}): keeping {len(valid_effects)} out of {L} effects")
-        print(f"Log trace norm differences: {log_trace_diff}")
-        print(f"Threshold: var_lj < 1/{int(10**prior_covar_filter)} var_l1")
+        print(f"Log norm differences: {log_norm_diff}")
+        print(f"Threshold: norm_lj < 1/{int(10**prior_covar_filter)} norm_l1")
         
         # Filter prior and posterior parameters
         prior = prior._replace(var_b=prior.var_b[valid_effects])
